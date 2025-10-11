@@ -1,0 +1,40 @@
+# Node
+node_modules/
+.next/
+pnpm-lock.yaml
+npm-debug.log*
+yarn.lock
+
+# Python
+__pycache__/
+.venv/
+.env
+.env.*
+*.pyc
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Data
+data/
+node_modules/
+.venv/
+.env
+local/
+data/
+logs/
+storage/
+tmp/
+.DS_Store
+node_modules/
+.venv/
+.env
+local/
+data/
+logs/
+storage/
+tmp/
+.DS_Store
