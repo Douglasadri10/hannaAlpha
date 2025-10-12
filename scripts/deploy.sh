@@ -4,7 +4,7 @@ set -euo pipefail
 # Defaults (ajuste se quiser)
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
-WEB_DIR="${WEB_DIR:-apps/web}"
+WEB_DIR="${WEB_DIR:-/Users/daimaximila/hannaaialpha/hanna/apps/web}"
 VERCEL_SCOPE="${VERCEL_SCOPE:-}"      # ex: douglas-projects-e4ca4334
 VERCEL_PROJECT="${VERCEL_PROJECT:-}"  # ex: hanna-alpha
 
