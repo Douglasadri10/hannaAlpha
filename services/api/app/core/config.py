@@ -1,6 +1,5 @@
 from fastapi import Response
 
-@router.post("/session")
 async def create_realtime_session(dry: bool = False):
     payload = {
         "model": (model or settings.openai_realtime_model),
