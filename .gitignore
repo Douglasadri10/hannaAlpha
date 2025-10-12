@@ -38,3 +38,4 @@ logs/
 storage/
 tmp/
 .DS_Store
+.vercel
