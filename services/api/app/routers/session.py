@@ -2,9 +2,13 @@ from fastapi import APIRouter, HTTPException
 from app.core.config import settings
 import httpx
 from typing import Optional
+from fastapi import Response
 
 router = APIRouter()
+
 @router.options("/session")
+async def options_session():
+    return Response(status_code=204)
 
 @router.post("/session")
 async def create_realtime_session(
@@ -26,10 +30,12 @@ async def create_realtime_session(
         "Content-Type": "application/json",
         "OpenAI-Beta": "realtime=v1",
     }
-    if settings.openai_org_id:
-        headers["OpenAI-Organization"] = settings.openai_org_id
-    if settings.openai_project_id:
-        headers["OpenAI-Project"] = settings.openai_project_id
+    org_id = getattr(settings, "openai_org_id", None)
+    if org_id:
+        headers["OpenAI-Organization"] = org_id
+    project_id = getattr(settings, "openai_project_id", None)
+    if project_id:
+        headers["OpenAI-Project"] = project_id
 
     payload = {
         "model": (model or settings.openai_realtime_model),

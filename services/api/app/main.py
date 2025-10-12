@@ -1,26 +1,24 @@
 import os, sys
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
 from app.routers import session, tool, feedback
 
-# Garante que o FastAPI ache os módulos
+# Garante que o FastAPI ache os módulos (app/...)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 app = FastAPI(title="Hanna API", version="0.1.0")
 
 # --- CORS CONFIG ---
-origins_env = os.getenv(
-    "CORS_ORIGINS",
-    "https://hanna-alpha.vercel.app,https://hannaalpha.onrender.com"
-)
-origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+# Origens vindas do .env/Render (CORS_ORIGINS CSV). Defaults cobrem Vercel + Render.
+origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 
-# Adiciona locais de dev
-for dev in ["http://localhost:3000", "http://127.0.0.1:3000"]:
+# Adiciona locais de dev sempre
+for dev in ("http://localhost:3000", "http://127.0.0.1:3000"):
     if dev not in origins:
         origins.append(dev)
 
-# Regex pro caso de subdomínios do Vercel (previews)
+# Regex para liberar previews do Vercel (ex.: https://hanna-alpha-git-main-*.vercel.app)
 origin_regex = r"https://.*\.vercel\.app"
 
 app.add_middleware(
@@ -36,6 +34,11 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# --- PRE-FLIGHT DEDICADO (alguns proxies exigem explicitamente) ---
+@app.options("/session")
+def options_session_root():
+    return Response(status_code=204)
 
 # --- ROTAS ---
 app.include_router(session.router, tags=["realtime"])
