@@ -1,20 +1,38 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
+// Loose typings for Web Speech API (browser-provided)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpeechRecognition = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpeechRecognitionEvent = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpeechRecognitionResult = any;
+
 /**
- * WebRTC client for Hanna (OpenAI Realtime).
- * - Robust env resolution
- * - Safer CORS / timeouts
- * - Cleaner connect/disconnect UX (Esc to hang up)
- * - Better connection state/status messages
+ * WebRTC client for Hanna (OpenAI Realtime) com hotword e push‑to‑talk.
+ * - Gating de microfone: só envia áudio após detectar "Hanna" (ou PTT).
+ * - Timeout/AbortController para evitar travas.
+ * - UX de conexão e desligar (Esc).
  */
 export default function TalkToHanna() {
   const [pc, setPc] = useState<RTCPeerConnection | null>(null);
   const [connected, setConnected] = useState(false);
   const [negotiating, setNegotiating] = useState(false);
   const [status, setStatus] = useState<string>("");
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+
+  // Hotword (Web Speech API)
+  const SpeechRecognitionRef = useRef<(new () => SpeechRecognition) | null>(
+    null
+  );
+  const recognizerRef = useRef<SpeechRecognition | null>(null);
+  const wakeTimerRef = useRef<number | null>(null);
+
+  // Gating state
+  const [micActive, setMicActive] = useState(false);
 
   // ---------- Config from ENV (with sane fallbacks) ----------
   const MODEL =
@@ -42,9 +60,9 @@ export default function TalkToHanna() {
     if (!audioRef.current) {
       const el = document.createElement("audio") as HTMLAudioElement;
       el.autoplay = true;
-      // For TS compatibility on audio, set attribute instead of accessing a non-existent typed prop
+      // TS-safe playsinline attribute
       el.setAttribute("playsinline", "true");
-      el.style.display = "none"; // keep DOM clean
+      el.style.display = "none";
       document.body.appendChild(el);
       audioRef.current = el;
     }
@@ -55,7 +73,21 @@ export default function TalkToHanna() {
     };
   }
 
+  function setMicGate(on: boolean) {
+    setMicActive(on);
+    try {
+      localStreamRef.current?.getAudioTracks().forEach((t) => (t.enabled = on));
+    } catch {}
+  }
+
   function teardown() {
+    // Desliga hotword
+    try {
+      recognizerRef.current?.stop();
+    } catch {}
+    if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
+
+    // Fecha mídia e peer
     setConnected(false);
     setStatus("Desconectado.");
     try {
@@ -67,6 +99,7 @@ export default function TalkToHanna() {
     if (audioRef.current) {
       try {
         audioRef.current.pause();
+        // @ts-expect-error: srcObject é settable
         audioRef.current.srcObject = null;
         document.body.removeChild(audioRef.current);
       } catch {}
@@ -77,6 +110,7 @@ export default function TalkToHanna() {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
+    setMicGate(false);
   }
 
   // Allow Esc to hang up
@@ -86,12 +120,74 @@ export default function TalkToHanna() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Cleanup when component unmounts
   useEffect(() => {
     return () => teardown();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Hotword listener (Web Speech API) — ativa gate ao detectar "Hanna" no INÍCIO da fala
+  useEffect(() => {
+    // @ts-expect-error: tipos dependem do navegador
+    const SR: any =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+    SpeechRecognitionRef.current = SR || null;
+    if (!SR) {
+      setStatus(
+        "Hotword indisponível no navegador; use o botão 'Falar (segure)'."
+      );
+      return;
+    }
+
+    const rec: any = new SR();
+    recognizerRef.current = rec;
+    rec.lang = "pt-BR";
+    rec.continuous = true;
+    rec.interimResults = false;
+
+    rec.onresult = (ev: SpeechRecognitionEvent) => {
+      const text = Array.from(ev.results as any)
+        .map((r: SpeechRecognitionResult) => r[0]?.transcript ?? "")
+        .join(" ")
+        .trim()
+        .toLowerCase();
+
+      const startsWithHanna =
+        text.startsWith("hanna") ||
+        text.startsWith("oi hanna") ||
+        text.startsWith("hey hanna") ||
+        text.startsWith("ei hanna");
+
+      if (startsWithHanna) {
+        setStatus("Hotword detectada: microfone liberado por 4s");
+        setMicGate(true);
+        if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
+        wakeTimerRef.current = window.setTimeout(() => {
+          setMicGate(false);
+          setStatus("Aguardando chamar 'Hanna'…");
+        }, 4000);
+      }
+    };
+
+    rec.onerror = () => {
+      setStatus("Hotword falhou; use o botão 'Falar (segure)' para conversar.");
+    };
+
+    try {
+      rec.start();
+      setStatus((s) => (s ? s : "Aguardando chamar 'Hanna'…"));
+    } catch {}
+
+    return () => {
+      try {
+        rec.stop();
+      } catch {}
+      if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
+    };
   }, []);
 
   async function startSession() {
@@ -106,6 +202,10 @@ export default function TalkToHanna() {
       // 1) Get mic
       const local = await navigator.mediaDevices.getUserMedia({ audio: true });
       localStreamRef.current = local;
+
+      // Gate OFF por padrão (só hotword/PTT liga)
+      local.getAudioTracks().forEach((t) => (t.enabled = false));
+      setMicActive(false);
 
       // 2) PeerConnection (with public STUN)
       const peer = new RTCPeerConnection({
@@ -187,7 +287,7 @@ export default function TalkToHanna() {
           peer.iceConnectionState === "completed"
         ) {
           setConnected(true);
-          setStatus(`Conectado. Voz: ${VOICE}. Fale com a Hanna!`);
+          setStatus(`Conectado. Voz: ${VOICE}. Diga: “Hanna, …” ou use PTT.`);
         }
         if (
           peer.iceConnectionState === "disconnected" ||
@@ -200,7 +300,7 @@ export default function TalkToHanna() {
 
       peer.onconnectionstatechange = () => {
         if (peer.connectionState === "failed") {
-          setStatus("Falha na conexão. Tentando encerrar…");
+          setStatus("Falha na conexão. Encerrando…");
           teardown();
         }
       };
@@ -257,6 +357,25 @@ export default function TalkToHanna() {
         </button>
       ) : (
         <div style={{ display: "flex", gap: 12 }}>
+          <button
+            onMouseDown={() => setMicGate(true)}
+            onMouseUp={() => setMicGate(false)}
+            onTouchStart={() => setMicGate(true)}
+            onTouchEnd={() => setMicGate(false)}
+            style={{
+              backgroundColor: micActive ? "#22c55e" : "#0ea5e9",
+              border: "none",
+              padding: "1rem 2rem",
+              borderRadius: 12,
+              fontSize: "1.2rem",
+              color: "#fff",
+              cursor: "pointer",
+            }}
+            title="Segure para falar"
+          >
+            {micActive ? "🎙️ Falando…" : "Falar (segure)"}
+          </button>
+
           <button
             onClick={teardown}
             style={{
