@@ -27,7 +27,7 @@ else
 fi
 git push "$REMOTE" "$BRANCH"
 
-echo "🚀 Deploy Vercel (produção) no diretório $WEB_DIR…"
+echo "🚀 Deploy Vercel (produção) no diretório $WEB_DIR"
 [ -d "$WEB_DIR" ] || { echo "❌ Pasta $WEB_DIR não existe."; exit 1; }
 cd "$WEB_DIR"
 
