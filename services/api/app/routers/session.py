@@ -42,9 +42,8 @@ async def create_realtime_session(
             "Otimize custo: mínimo de tokens sem perder clareza. "
             "Quando perguntarem seu nome, apresente-se como 'Hanna'."
         ),
-        "max_output_tokens": int(max_tokens) if max_tokens else 60,
         "turn_detection": { "type": "server_vad", "silence_duration_ms": 300 },
-        "interruption_response": True
+        "interrupt_response": True
     }
 
     try:
