@@ -99,7 +99,6 @@ export default function TalkToHanna() {
     if (audioRef.current) {
       try {
         audioRef.current.pause();
-        // @ts-expect-error: srcObject é settable
         audioRef.current.srcObject = null;
         document.body.removeChild(audioRef.current);
       } catch {}
@@ -131,7 +130,6 @@ export default function TalkToHanna() {
 
   // Hotword listener (Web Speech API) — ativa gate ao detectar "Hanna" no INÍCIO da fala
   useEffect(() => {
-    // @ts-expect-error: tipos dependem do navegador
     const SR: any =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;

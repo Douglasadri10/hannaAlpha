@@ -8,6 +8,12 @@ WEB_DIR="${WEB_DIR:-apps/web}"
 VERCEL_SCOPE="${VERCEL_SCOPE:-}"      # ex: douglas-projects-e4ca4334
 VERCEL_PROJECT="${VERCEL_PROJECT:-}"  # ex: hanna-alpha
 
+# Exporta variáveis de ambiente para o build
+export NODE_ENV=production
+export NEXT_PUBLIC_API_BASE="https://hannaalpha.onrender.com"
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+export PORT="${PORT:-8080}"
+
 # Mensagem de commit (arg1) ou padrão
 MSG="${1:-chore: deploy}"
 
