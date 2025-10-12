@@ -18,6 +18,5 @@ async def create_realtime_session(dry: bool = False):
     if dry:
         return {"payload": payload}
 
-@router.options("/session")
 async def options_session():
     return Response(status_code=204)

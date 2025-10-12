@@ -4,6 +4,7 @@ import httpx
 from typing import Optional
 
 router = APIRouter()
+@router.options("/session")
 
 @router.post("/session")
 async def create_realtime_session(
