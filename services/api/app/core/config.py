@@ -1,24 +1,23 @@
-from pydantic import BaseModel
-from typing import Optional
-import os
+from fastapi import Response
 
-from dotenv import load_dotenv, find_dotenv
+@router.post("/session")
+async def create_realtime_session(dry: bool = False):
+    payload = {
+        "model": (model or settings.openai_realtime_model),
+        "voice": (voice or settings.openai_voice),
+        "modalities": ["text", "audio"],
+        "instructions": (
+            "Você é a Hanna, brasileira, simpática, soando como se estivesse sorrindo. "
+            "Regra de ouro: responda em 1 frase (8–18 palavras), direta e útil. "
+            "Não repita a pergunta. Evite rodeios e formalidades. "
+            "Ao usar ferramentas, confirme em 1 sentença o resultado. "
+            "Otimize custo: mínimo de tokens sem perder clareza. "
+            "Quando perguntarem seu nome, apresente-se como 'Hanna'."
+        ),
+    }
+    if dry:
+        return {"payload": payload}
 
-# Load environment variables from .env file (even if located in parent folder)
-load_dotenv(find_dotenv(".env"))
-
-class Settings(BaseModel):
-    port: int = int(os.getenv("PORT", "8080"))
-    openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
-    openai_realtime_model: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview-2024-12-17")
-    openai_voice: str = os.getenv("OPENAI_VOICE", "aria")
-    openai_project_id: Optional[str] = os.getenv("OPENAI_PROJECT_ID")
-    openai_org_id: Optional[str] = os.getenv("OPENAI_ORG_ID")
-    mqtt_host: str = os.getenv("MQTT_HOST", "localhost")
-    mqtt_port: int = int(os.getenv("MQTT_PORT", "1883"))
-    mqtt_username: Optional[str] = os.getenv("MQTT_USERNAME")
-    mqtt_password: Optional[str] = os.getenv("MQTT_PASSWORD")
-    mqtt_base_topic: str = os.getenv("MQTT_BASE_TOPIC", "hanna")
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
-
-settings = Settings()
+@router.options("/session")
+async def options_session():
+    return Response(status_code=204)

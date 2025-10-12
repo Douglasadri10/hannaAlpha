@@ -42,9 +42,7 @@ async def create_realtime_session(
             "Otimize custo: mínimo de tokens sem perder clareza. "
             "Quando perguntarem seu nome, apresente-se como 'Hanna'."
         ),
-        "turn_detection": { "type": "server_vad", "silence_duration_ms": 300 },
-        "interrupt_response": True
-    }
+           }
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
