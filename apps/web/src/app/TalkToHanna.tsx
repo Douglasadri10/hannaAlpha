@@ -8,6 +8,8 @@ type SpeechRecognition = any;
 type SpeechRecognitionEvent = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechRecognitionResult = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpeechGrammarList = any;
 
 /**
  * WebRTC client for Hanna (OpenAI Realtime) com hotword e push‑to‑talk.
@@ -134,12 +136,18 @@ export default function TalkToHanna() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Hotword listener (Web Speech API) — ativa gate ao detectar "Hanna" no INÍCIO da fala
+  // Hotword listener (Web Speech API) — ativa somente quando conectado
   useEffect(() => {
     const SR: any =
       (window as any).SpeechRecognition ||
       (window as any).webkitSpeechRecognition;
+    const SGL: SpeechGrammarList | undefined =
+      (window as any).SpeechGrammarList ||
+      (window as any).webkitSpeechGrammarList;
+
     SpeechRecognitionRef.current = SR || null;
+
+    // Sem suporte, apenas informe e não tente rodar
     if (!SR) {
       setStatus(
         "Hotword indisponível no navegador; use o botão 'Falar (segure)'."
@@ -147,11 +155,61 @@ export default function TalkToHanna() {
       return;
     }
 
+    // Só mantenha o recognizer ativo quando conectado
+    if (!connected) {
+      try {
+        recognizerRef.current?.abort?.();
+        recognizerRef.current?.stop?.();
+      } catch {}
+      return;
+    }
+
+    // Evita múltiplas instâncias
+    try {
+      recognizerRef.current?.abort?.();
+      recognizerRef.current?.stop?.();
+    } catch {}
+
     const rec: any = new SR();
     recognizerRef.current = rec;
+
+    // Tenta "forçar" o vocabulário prioritário para 'hanna'
+    try {
+      if (SGL) {
+        const grammars = new (SGL as any)();
+        // JSGF simples, dando peso maior para 'hanna'
+        grammars.addFromString(
+          "#JSGF V1.0; grammar wake; public &lt;wake&gt; = hanna;",
+          1
+        );
+        rec.grammars = grammars;
+      }
+    } catch {}
+
     rec.lang = "pt-BR";
     rec.continuous = true;
-    rec.interimResults = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    let restarting = false;
+    const restart = (why: string) => {
+      if (!connected || restarting) return;
+      restarting = true;
+      // pequeno backoff para não entrar em loop em erros como 'no-speech'
+      setTimeout(() => {
+        restarting = false;
+        try {
+          rec.start();
+        } catch (err) {
+          console.warn("SR restart fail:", err, "reason:", why);
+        }
+      }, 600);
+    };
+
+    rec.onstart = () => {
+      // status apenas para debug leve
+      // console.debug("SR onstart");
+    };
 
     rec.onresult = (ev: SpeechRecognitionEvent) => {
       const text = Array.from(ev.results as any)
@@ -160,13 +218,8 @@ export default function TalkToHanna() {
         .trim()
         .toLowerCase();
 
-      const startsWithHanna =
-        text.startsWith("hanna") ||
-        text.startsWith("oi hanna") ||
-        text.startsWith("hey hanna") ||
-        text.startsWith("ei hanna");
-
-      if (startsWithHanna) {
+      // Palavra exata apenas: 'hanna'
+      if (/\bhanna\b/.test(text)) {
         setStatus("Hotword detectada: microfone liberado por 4s");
         setMicGate(true);
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
@@ -177,22 +230,49 @@ export default function TalkToHanna() {
       }
     };
 
-    rec.onerror = () => {
-      setStatus("Hotword falhou; use o botão 'Falar (segure)' para conversar.");
+    rec.onaudioend = () => {
+      // Chrome frequentemente chama 'no-speech' + encerra captura;
+      // reiniciaremos com pequeno backoff
+      restart("audioend");
+    };
+
+    rec.onend = () => {
+      restart("end");
+    };
+
+    rec.onerror = (e: any) => {
+      // Erros comuns:
+      // 'no-speech' (sem fala por alguns segundos),
+      // 'audio-capture' (mic ocupado/sem permissão),
+      // 'network' (API remota do SR falhou),
+      // 'aborted' (quando chamamos abort/stop).
+      const et = (e?.error || "").toString();
+      if (et === "aborted") return; // esperado ao trocar de estado
+      if (et === "no-speech" || et === "network") {
+        restart(et);
+      } else if (et === "audio-capture") {
+        // geralmente permissão ou conflito; apenas informe
+        console.warn("SpeechRecognition sem acesso ao microfone.");
+      } else {
+        console.warn("SpeechRecognition error:", e);
+      }
     };
 
     try {
+      // Inicia após o gesto do usuário (já ocorreu ao conectar)
       rec.start();
-      setStatus((s) => (s ? s : "Aguardando chamar 'Hanna'…"));
-    } catch {}
+    } catch (err) {
+      console.warn("SpeechRecognition start error:", err);
+    }
 
     return () => {
       try {
-        rec.stop();
+        rec.abort?.();
+        rec.stop?.();
       } catch {}
       if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
     };
-  }, []);
+  }, [connected]);
 
   async function startSession() {
     if (negotiating || connected) return;
@@ -203,8 +283,50 @@ export default function TalkToHanna() {
     const timeout = setTimeout(() => abort.abort(), 25_000); // 25s safety timeout
 
     try {
-      // 1) Get mic
-      const local = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 0) Verifica dispositivos de áudio disponíveis
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter((d) => d.kind === "audioinput");
+      if (!mics.length) {
+        setStatus(
+          "Nenhum microfone foi encontrado. Conecte um microfone e recarregue a página."
+        );
+        alert(
+          "Nenhum microfone disponível. Conecte/ative um microfone e confira as permissões do navegador."
+        );
+        throw new Error("no-audio-input");
+      }
+
+      // Seleciona o primeiro mic disponível como padrão
+      const chosen = mics[0];
+
+      // 1) Tenta capturar áudio com constraints mais explícitas
+      let local: MediaStream | null = null;
+      const primaryConstraints: MediaStreamConstraints = {
+        audio: {
+          deviceId: chosen.deviceId ? { exact: chosen.deviceId } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      };
+
+      try {
+        local = await navigator.mediaDevices.getUserMedia(primaryConstraints);
+      } catch (err: any) {
+        // Fallback: tenta com constraints simples
+        if (
+          err?.name === "OverconstrainedError" ||
+          err?.name === "NotFoundError"
+        ) {
+          local = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } else {
+          throw err;
+        }
+      }
+
+      if (!local) throw new Error("failed-to-getusermedia");
+
       localStreamRef.current = local;
 
       // Gate OFF por padrão (só hotword/PTT liga)
@@ -225,7 +347,7 @@ export default function TalkToHanna() {
       peer.addTransceiver("audio", { direction: "recvonly" });
 
       // 4) Add local tracks
-      local.getTracks().forEach((t) => peer.addTrack(t, local));
+      local.getTracks().forEach((t) => peer.addTrack(t, local!));
 
       // 5) Offer
       const offer = await peer.createOffer({ offerToReceiveAudio: true });
@@ -315,6 +437,13 @@ export default function TalkToHanna() {
       console.error("startSession erro:", err);
       if (err?.name === "NotAllowedError") {
         alert("Permissão de microfone negada. Habilite para continuar.");
+      } else if (
+        err?.name === "NotFoundError" ||
+        err?.message === "no-audio-input"
+      ) {
+        alert(
+          "Nenhum dispositivo de áudio foi encontrado. Verifique se há um microfone conectado/selecionado e se as permissões do navegador estão ativas."
+        );
       } else if (err?.name === "AbortError") {
         alert("Tempo esgotado ao conectar. Tente novamente.");
       } else {

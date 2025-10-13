@@ -1,8 +1,77 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from app.core.config import settings
 import httpx
 from typing import Optional
-from fastapi import Response
+
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "switchLight",
+        "description": "Liga ou desliga uma luz de um cômodo.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "room": {"type": "string"},
+                "state": {"type": "string", "enum": ["on", "off"]},
+            },
+            "required": ["room", "state"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "setAC",
+        "description": "Ajusta o ar-condicionado para uma temperatura em graus Celsius.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "room": {"type": "string"},
+                "temp": {"type": "number"},
+            },
+            "required": ["room", "temp"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "createCalendarEvent",
+        "description": "Agenda um compromisso no Google Calendar do usuário.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Título curto e objetivo.",
+                },
+                "start": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Início do evento em ISO 8601, incluindo timezone quando possível.",
+                },
+                "end": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Término em ISO 8601; use duration_minutes se não souber.",
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 720,
+                    "description": "Duração em minutos caso não informe o término.",
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone IANA (ex.: America/Sao_Paulo).",
+                },
+                "location": {"type": "string"},
+                "description": {"type": "string"},
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string", "format": "email"},
+                },
+            },
+            "required": ["title", "start"],
+        },
+    },
+]
 
 router = APIRouter()
 
@@ -42,15 +111,16 @@ async def create_realtime_session(
         "voice": (voice or settings.openai_voice),
         "modalities": ["text", "audio"],
         "instructions": (
-            "Você é a Hanna, brasileira, simpática, soando como se estivesse sorrindo, muito alegre. "
-            "ATENÇÃO: Só responda quando ouvir claramente o meu nome 'Hanna' (ex.: 'Hanna,' ou 'Oi, Hanna'). "
-            "Se não ouvir o nome, permaneça em silêncio absoluto. "
-            "Quando responder, use 1 frase (8–18 palavras), direta e útil; não repita a pergunta; evite formalidades. "
-            "Ao usar ferramentas, confirme em 1 sentença o resultado. "
-            "Otimize custo: mínimo de tokens sem perder clareza. "
-            "Quando perguntarem seu nome, apresente-se como 'Hanna'."
+            "Seu nome é Hanna, brasileira, simpática, soando como se estivesse sorrindo. "
+            "Só responda depois de ouvir claramente alguém chamar você pelo nome 'Hanna'. "
+            "Responda em 1 frase (8–18 palavras), com tom animado, gentil e informal do português brasileiro, sem repetir a pergunta. "
+            "Quando perguntarem seu nome, apresente-se como 'Hanna'. "
+            "Para automatizar a casa, use as ferramentas switchLight e setAC com os parâmetros corretos. "
+            "Ao organizar compromissos, use createCalendarEvent fornecendo título, horário inicial em ISO 8601, timezone (America/Sao_Paulo caso não saiba), local e detalhes relevantes. "
+            "Após usar uma ferramenta, confirme o resultado em uma frase direta."
         ),
-           }
+        "tools": TOOL_SCHEMAS,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:

@@ -25,4 +25,16 @@ class Settings(BaseModel):
         "https://hanna-alpha.vercel.app, https://hannaalpha.onrender.com",
     )
 
+    # Google Calendar
+    google_credentials_path: Optional[str] = os.getenv("GOOGLE_CREDENTIALS_JSON_PATH")
+    google_calendar_id: Optional[str] = os.getenv("GOOGLE_CALENDAR_ID")
+    google_impersonated_user: Optional[str] = os.getenv("GOOGLE_IMPERSONATED_USER")
+    calendar_default_timezone: str = os.getenv(
+        "CALENDAR_DEFAULT_TIMEZONE",
+        "America/Sao_Paulo",
+    )
+    calendar_default_duration_minutes: int = int(
+        os.getenv("CALENDAR_DEFAULT_DURATION_MINUTES", "60")
+    )
+
 settings = Settings()

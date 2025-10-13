@@ -1,7 +1,12 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+from datetime import datetime
+from typing import List, Optional
+
 import paho.mqtt.publish as publish
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
 from app.core.config import settings
+from app.services.google_calendar import GoogleCalendarError, create_calendar_event
 
 router = APIRouter()
 
@@ -14,8 +19,31 @@ class SetAC(BaseModel):
     temp: float
 
 class CreateCalendarEvent(BaseModel):
-    title: str
-    when: str
+    title: str = Field(..., description="Título curto e objetivo do compromisso.")
+    start: datetime = Field(
+        ...,
+        description="Data/hora de início em ISO 8601 (ex.: 2024-10-20T08:00:00-03:00).",
+    )
+    end: Optional[datetime] = Field(
+        None,
+        description="Data/hora de término em ISO 8601. Usa duration_minutes se ausente.",
+    )
+    duration_minutes: Optional[int] = Field(
+        None,
+        ge=5,
+        le=12 * 60,
+        description="Duração em minutos quando `end` não for informado.",
+    )
+    timezone: Optional[str] = Field(
+        None,
+        description="Timezone IANA (ex.: America/Sao_Paulo). Se vazio, usa padrão do sistema.",
+    )
+    location: Optional[str] = Field(None, description="Local do compromisso.")
+    description: Optional[str] = Field(None, description="Detalhes adicionais.")
+    attendees: Optional[List[str]] = Field(
+        None,
+        description="Lista de e-mails para convidar.",
+    )
 
 def mqtt_pub(topic: str, payload: str):
     auth = None
@@ -43,5 +71,32 @@ def tool_set_ac(body: SetAC):
 
 @router.post("/tool/createCalendarEvent")
 def tool_create_calendar_event(body: CreateCalendarEvent):
-    # TODO: integrar Google Calendar; por enquanto, só ecoa
-    return {"ok": True, "note": "Calendar TODO", "data": body.model_dump()}
+    attendees_payload = None
+    if body.attendees:
+        attendees_payload = [
+            {"email": email.strip()}
+            for email in body.attendees
+            if email and email.strip()
+        ] or None
+
+    try:
+        event = create_calendar_event(
+            title=body.title,
+            description=body.description,
+            location=body.location,
+            start=body.start,
+            end=body.end,
+            duration_minutes=body.duration_minutes,
+            timezone=body.timezone,
+            attendees=attendees_payload,
+        )
+    except GoogleCalendarError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return {
+        "ok": True,
+        "eventId": event.get("id"),
+        "htmlLink": event.get("htmlLink"),
+        "start": event.get("start"),
+        "end": event.get("end"),
+    }
