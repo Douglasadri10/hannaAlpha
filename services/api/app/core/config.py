@@ -22,7 +22,7 @@ class Settings(BaseModel):
     # CORS (comma-separated)
     cors_origins: str = os.getenv(
         "CORS_ORIGINS",
-        "https://hanna-alpha.vercel.app,https://hannaalpha.onrender.com",
+        "https://hanna-alpha.vercel.app, https://hannaalpha.onrender.com",
     )
 
 settings = Settings()

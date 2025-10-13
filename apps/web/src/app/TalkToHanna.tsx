@@ -60,7 +60,9 @@ export default function TalkToHanna() {
     if (!audioRef.current) {
       const el = document.createElement("audio") as HTMLAudioElement;
       el.autoplay = true;
-      // TS-safe playsinline attribute
+      el.muted = false;
+      el.volume = 1.0;
+      // TS-safe playsinline attribute for iOS/Safari
       el.setAttribute("playsinline", "true");
       el.style.display = "none";
       document.body.appendChild(el);
@@ -69,6 +71,10 @@ export default function TalkToHanna() {
     peer.ontrack = (e) => {
       if (audioRef.current) {
         audioRef.current.srcObject = e.streams[0];
+        // Try to play immediately after a user gesture
+        audioRef.current
+          .play()
+          .catch((err) => console.warn("audio play blocked:", err));
       }
     };
   }
@@ -214,6 +220,9 @@ export default function TalkToHanna() {
 
       // 3) Remote audio
       attachRemoteAudio(peer);
+
+      // 3.1) Receber áudio remoto explicitamente
+      peer.addTransceiver("audio", { direction: "recvonly" });
 
       // 4) Add local tracks
       local.getTracks().forEach((t) => peer.addTrack(t, local));
