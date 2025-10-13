@@ -19,7 +19,7 @@ for dev in ("http://localhost:3000", "http://127.0.0.1:3000"):
         origins.append(dev)
 
 # Regex para liberar previews do Vercel (ex.: https://hanna-alpha-git-main-*.vercel.app)
-origin_regex = r"https://.*\.vercel\.app"
+origin_regex = r"https://hanna-alpha.vercel.app/"
 
 app.add_middleware(
     CORSMiddleware,
