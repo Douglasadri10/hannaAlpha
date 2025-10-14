@@ -33,9 +33,8 @@ def _client_config():
         "web": {
             "client_id": client_id,
             "client_secret": client_secret,
-            # keep also here because some libs read from client config
             "redirect_uris": [redirect_uri],
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
@@ -52,11 +51,27 @@ def google_oauth_start():
     flow.redirect_uri = redirect_uri
 
     auth_url, _ = flow.authorization_url(
-        access_type="offline",  # issue refresh token
-        include_granted_scopes="true",
+        access_type="offline",
+        include_granted_scopes=True,
         prompt="consent",
+        redirect_uri=redirect_uri,
     )
     return RedirectResponse(auth_url)
+
+
+@router.get("/oauth/start/url")
+def google_oauth_start_url():
+    """Return the Google consent URL as plain text for quick debugging."""
+    cfg, redirect_uri = _client_config()
+    flow = Flow.from_client_config(cfg, scopes=SCOPES)
+    flow.redirect_uri = redirect_uri
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes=True,
+        prompt="consent",
+        redirect_uri=redirect_uri,
+    )
+    return auth_url
 
 
 @router.get("/oauth/callback")
@@ -70,13 +85,16 @@ def google_oauth_callback(code: Optional[str] = None):
     if not code:
         raise HTTPException(status_code=400, detail="Missing OAuth authorization code")
 
+    # If Google redirected back with an error, surface it clearly
+    from fastapi import Request
+
     cfg, redirect_uri = _client_config()
 
     flow = Flow.from_client_config(cfg, scopes=SCOPES)
     flow.redirect_uri = redirect_uri
 
     try:
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, redirect_uri=redirect_uri)
         creds = flow.credentials
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Falha ao trocar código por token: {e}")
@@ -106,3 +124,25 @@ def google_oauth_callback(code: Optional[str] = None):
         "has_refresh_token": bool(getattr(flow.credentials, "refresh_token", None)),
         "where_saved": dest_path or None,
     }
+
+@router.get("/oauth/debug")
+def google_oauth_debug():
+    """Return current OAuth env config (masked) and the computed consent URL.
+    Útil para diagnosticar 404/redirect_uri_mismatch.
+    """
+    cfg, redirect_uri = _client_config()
+    masked = {
+        "client_id": cfg["web"]["client_id"],
+        "client_secret": (cfg["web"].get("client_secret") or "")[0:4] + "…",
+        "redirect_uris": cfg["web"]["redirect_uris"],
+        "scopes": SCOPES,
+    }
+    flow = Flow.from_client_config(cfg, scopes=SCOPES)
+    flow.redirect_uri = redirect_uri
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes=True,
+        prompt="consent",
+        redirect_uri=redirect_uri,
+    )
+    return {"config": masked, "auth_url": auth_url}
