@@ -3,6 +3,7 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.routers import session, tool, feedback
+from app.routers.google_calendar import router as google_router
 
 # Garante que o FastAPI ache os módulos (app/...)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +20,7 @@ for dev in ("http://localhost:3000", "http://127.0.0.1:3000"):
         origins.append(dev)
 
 # Regex para liberar previews do Vercel (ex.: https://hanna-alpha-git-main-*.vercel.app)
-origin_regex = r"https://hanna-alpha.vercel.app"
+origin_regex = r"https://hanna-alpha.*\.vercel\.app"
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,3 +45,4 @@ def options_session_root():
 app.include_router(session.router, tags=["realtime"])
 app.include_router(tool.router, tags=["tools"])
 app.include_router(feedback.router, tags=["feedback"])
+app.include_router(google_router, prefix="/google", tags=["google"])
