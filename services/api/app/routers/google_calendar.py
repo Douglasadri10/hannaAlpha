@@ -14,20 +14,28 @@ SCOPES = [
 
 
 def _client_config():
-    """Build OAuth client config from env vars and validate required fields."""
-    client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
-    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
+    """Lê e valida as ENVs do OAuth, removendo espaços/quebras de linha."""
+    def g(name: str) -> str:
+        v = os.getenv(name)
+        return v.strip() if isinstance(v, str) else ""
 
-    if not client_id or not client_secret or not redirect_uri:
-        missing = [
-            k for k, v in {
-                "GOOGLE_OAUTH_CLIENT_ID": client_id,
-                "GOOGLE_OAUTH_CLIENT_SECRET": client_secret,
-                "GOOGLE_OAUTH_REDIRECT_URI": redirect_uri,
-            }.items() if not v
-        ]
+    client_id = g("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = g("GOOGLE_OAUTH_CLIENT_SECRET")
+    redirect_uri = g("GOOGLE_OAUTH_REDIRECT_URI")
+
+    missing = [n for n, v in {
+        "GOOGLE_OAUTH_CLIENT_ID": client_id,
+        "GOOGLE_OAUTH_CLIENT_SECRET": client_secret,
+        "GOOGLE_OAUTH_REDIRECT_URI": redirect_uri,
+    }.items() if not v]
+    if missing:
         raise HTTPException(status_code=500, detail=f"OAuth config ausente: {', '.join(missing)}")
+
+    # validação básica
+    if not client_id.endswith(".apps.googleusercontent.com"):
+        raise HTTPException(status_code=500, detail="CLIENT_ID inválido (deve terminar com .apps.googleusercontent.com)")
+    if not redirect_uri.startswith("http"):
+        raise HTTPException(status_code=500, detail="REDIRECT_URI inválido (precisa ser http/https)")
 
     cfg = {
         "web": {
@@ -45,33 +53,36 @@ def _client_config():
 def google_oauth_start():
     """Start the Google OAuth2 flow and redirect the user to Google's consent screen."""
     cfg, redirect_uri = _client_config()
-
-    flow = Flow.from_client_config(cfg, scopes=SCOPES)
-    # Explicitly set redirect_uri or Google may return redirect_uri_mismatch
-    flow.redirect_uri = redirect_uri
-
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes=True,
-        prompt="consent",
-        redirect_uri=redirect_uri,
-    )
-    return RedirectResponse(auth_url)
+    try:
+        flow = Flow.from_client_config(cfg, scopes=SCOPES)
+        flow.redirect_uri = redirect_uri
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes=True,
+            prompt="consent",
+            redirect_uri=redirect_uri,
+        )
+        return RedirectResponse(auth_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao montar fluxo OAuth: {e}")
 
 
 @router.get("/oauth/start/url")
 def google_oauth_start_url():
     """Return the Google consent URL as plain text for quick debugging."""
     cfg, redirect_uri = _client_config()
-    flow = Flow.from_client_config(cfg, scopes=SCOPES)
-    flow.redirect_uri = redirect_uri
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes=True,
-        prompt="consent",
-        redirect_uri=redirect_uri,
-    )
-    return auth_url
+    try:
+        flow = Flow.from_client_config(cfg, scopes=SCOPES)
+        flow.redirect_uri = redirect_uri
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes=True,
+            prompt="consent",
+            redirect_uri=redirect_uri,
+        )
+        return {"auth_url": auth_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Falha ao montar fluxo OAuth: {e}")
 
 
 @router.get("/oauth/callback")
@@ -131,18 +142,22 @@ def google_oauth_debug():
     Útil para diagnosticar 404/redirect_uri_mismatch.
     """
     cfg, redirect_uri = _client_config()
-    masked = {
-        "client_id": cfg["web"]["client_id"],
-        "client_secret": (cfg["web"].get("client_secret") or "")[0:4] + "…",
-        "redirect_uris": cfg["web"]["redirect_uris"],
-        "scopes": SCOPES,
-    }
-    flow = Flow.from_client_config(cfg, scopes=SCOPES)
-    flow.redirect_uri = redirect_uri
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes=True,
-        prompt="consent",
-        redirect_uri=redirect_uri,
-    )
-    return {"config": masked, "auth_url": auth_url}
+    try:
+        masked = {
+            "client_id_prefix": cfg["web"]["client_id"][:8],
+            "client_id_suffix": cfg["web"]["client_id"][-10:],
+            "has_secret": bool(cfg["web"]["client_secret"]),
+            "redirect_uris": cfg["web"]["redirect_uris"],
+            "scopes": SCOPES,
+        }
+        flow = Flow.from_client_config(cfg, scopes=SCOPES)
+        flow.redirect_uri = redirect_uri
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes=True,
+            prompt="consent",
+            redirect_uri=redirect_uri,
+        )
+        return {"config": masked, "auth_url": auth_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug falhou: {e}")
