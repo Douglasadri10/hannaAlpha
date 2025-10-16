@@ -58,7 +58,7 @@ def google_oauth_start():
         flow.redirect_uri = redirect_uri
         auth_url, _ = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes=True,
+            include_granted_scopes='true',
             prompt="consent",
         )
         return RedirectResponse(auth_url)
@@ -76,7 +76,7 @@ def google_oauth_start_url():
         flow.redirect_uri = redirect_uri
         auth_url, _ = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes=True,
+            include_granted_scopes='true',
             prompt="consent",
         )
         return {"auth_url": auth_url}
@@ -152,7 +152,7 @@ def google_oauth_debug():
         flow.redirect_uri = redirect_uri
         auth_url, _ = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes=True,
+            include_granted_scopes='true',
             prompt="consent",
         )
         return {"config": masked, "auth_url": auth_url}
