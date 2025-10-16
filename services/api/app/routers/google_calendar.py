@@ -1,160 +1,135 @@
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import RedirectResponse
-from google_auth_oauthlib.flow import Flow
+from __future__ import annotations
+
 import os
 import json
-from typing import Optional
+import datetime as dt
+from typing import List, Optional, Dict, Any
 
-router = APIRouter()
-
-# Scopes we need for Calendar write access
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar",
-]
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
 
-def _client_config():
-    """Lê e valida as ENVs do OAuth, removendo espaços/quebras de linha e retorna apenas o config dict."""
-    def g(name: str) -> str:
-        v = os.getenv(name)
-        return v.strip() if isinstance(v, str) else ""
+class GoogleCalendarError(Exception):
+    """Erro de integração com o Google Calendar."""
+    pass
 
-    client_id = g("GOOGLE_OAUTH_CLIENT_ID")
-    client_secret = g("GOOGLE_OAUTH_CLIENT_SECRET")
-    redirect_uri = g("GOOGLE_OAUTH_REDIRECT_URI")
 
-    missing = [n for n, v in {
-        "GOOGLE_OAUTH_CLIENT_ID": client_id,
-        "GOOGLE_OAUTH_CLIENT_SECRET": client_secret,
-        "GOOGLE_OAUTH_REDIRECT_URI": redirect_uri,
-    }.items() if not v]
+# ===== Helpers =====
+
+def _creds_path() -> str:
+    """Devolve o caminho do arquivo de credenciais salvo pelo OAuth callback."""
+    return os.getenv("GOOGLE_CREDENTIALS_JSON_PATH", "/tmp/gcp.json")
+
+
+def _load_creds() -> Credentials:
+    """Reconstrói Credentials a partir do JSON salvo no callback.
+
+    Espera um JSON com chaves: token, refresh_token (opcional), token_uri,
+    client_id, client_secret, scopes.
+    """
+    path = _creds_path()
+    if not os.path.exists(path):
+        raise GoogleCalendarError(
+            f"Credenciais não encontradas em {path}. Acesse /google/oauth/start para autorizar.")
+
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise GoogleCalendarError(f"Falha ao ler credenciais em {path}: {e}")
+
+    required = ["token", "token_uri", "client_id", "client_secret", "scopes"]
+    missing = [k for k in required if not data.get(k)]
     if missing:
-        raise HTTPException(status_code=500, detail=f"OAuth config ausente: {', '.join(missing)}")
+        raise GoogleCalendarError(
+            "Arquivo de credenciais incompleto (faltando: " + ", ".join(missing) + "). Refaça o OAuth.")
 
-    if not client_id.endswith(".apps.googleusercontent.com"):
-        raise HTTPException(status_code=500, detail="CLIENT_ID inválido (deve terminar com .apps.googleusercontent.com)")
-    if not redirect_uri.startswith("http"):
-        raise HTTPException(status_code=500, detail="REDIRECT_URI inválido (precisa ser http/https)")
+    creds = Credentials(
+        token=data.get("token"),
+        refresh_token=data.get("refresh_token"),
+        token_uri=data["token_uri"],
+        client_id=data["client_id"],
+        client_secret=data["client_secret"],
+        scopes=data["scopes"],
+    )
 
-    cfg = {
-        "web": {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uris": [redirect_uri],
-            "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }
-    }
-    return cfg
-
-
-@router.get("/oauth/start")
-def google_oauth_start():
-    """Start the Google OAuth2 flow and redirect the user to Google's consent screen."""
-    cfg = _client_config()
-    redirect_uri = cfg["web"]["redirect_uris"][0]
-    try:
-        flow = Flow.from_client_config(cfg, scopes=SCOPES)
-        flow.redirect_uri = redirect_uri
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes='true',
-            prompt="consent",
-        )
-        return RedirectResponse(auth_url)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao montar fluxo OAuth: {e}")
-
-
-@router.get("/oauth/start/url")
-def google_oauth_start_url():
-    """Return the Google consent URL as plain text for quick debugging."""
-    cfg = _client_config()
-    redirect_uri = cfg["web"]["redirect_uris"][0]
-    try:
-        flow = Flow.from_client_config(cfg, scopes=SCOPES)
-        flow.redirect_uri = redirect_uri
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes='true',
-            prompt="consent",
-        )
-        return {"auth_url": auth_url}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Falha ao montar fluxo OAuth: {e}")
-
-
-@router.get("/oauth/callback")
-def google_oauth_callback(code: Optional[str] = None):
-    """OAuth callback: exchange `code` for tokens and stash credentials.
-
-    This endpoint expects the provider to redirect to our configured
-    GOOGLE_OAUTH_REDIRECT_URI (which should be /google/oauth/callback on this API)
-    with a `code` query parameter.
-    """
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing OAuth authorization code")
-
-    cfg = _client_config()
-    redirect_uri = cfg["web"]["redirect_uris"][0]
-
-    flow = Flow.from_client_config(cfg, scopes=SCOPES)
-    flow.redirect_uri = redirect_uri
-
-    try:
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Falha ao trocar código por token: {e}")
-
-    # Persist credentials if a path is provided
-    dest_path = os.getenv("GOOGLE_CREDENTIALS_JSON_PATH")
-    if dest_path:
-        payload = {
-            "token": creds.token,
-            "refresh_token": getattr(creds, "refresh_token", None),
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes,
-        }
+    # Atualiza access token se expirado
+    if not creds.valid and creds.refresh_token:
         try:
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "w") as f:
-                json.dump(payload, f)
+            creds.refresh(Request())
+            # persiste o novo token no mesmo arquivo
+            data["token"] = creds.token
+            with open(path, "w") as f:
+                json.dump(data, f)
         except Exception as e:
-            # Not fatal for the OAuth flow; the client may choose to save manually
-            raise HTTPException(status_code=500, detail=f"Token recebido, mas falha ao salvar credenciais: {e}")
+            raise GoogleCalendarError(f"Falha ao renovar token: {e}")
 
-    return {
-        "ok": True,
-        "message": "Autorização concluída com sucesso!",
-        "has_refresh_token": bool(getattr(flow.credentials, "refresh_token", None)),
-        "where_saved": dest_path or None,
-    }
+    return creds
 
-@router.get("/oauth/debug")
-def google_oauth_debug():
-    """Return current OAuth env config (masked) and the computed consent URL.
-    Útil para diagnosticar 404/redirect_uri_mismatch.
+
+def _calendar_id() -> str:
+    """Calendar ID alvo; usa primary por padrão."""
+    return os.getenv("GOOGLE_CALENDAR_ID", "primary")
+
+
+def _build_service():
+    creds = _load_creds()
+    # cache_discovery=False evita gravação de cache em disco (útil em containers)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+
+# ===== API usada pelo router/tool =====
+
+def create_calendar_event(
+    title: str,
+    start: str,
+    end: Optional[str] = None,
+    duration_minutes: Optional[int] = None,
+    timezone: str = "UTC",
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+    attendees: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Cria um evento no Google Calendar usando as credenciais salvas via OAuth.
+
+    `start`/`end` devem ser ISO 8601 (ex.: "2025-10-20T08:00:00-03:00").
+    Se `end` não for informado, será calculado a partir de `duration_minutes`.
     """
-    cfg = _client_config()
-    redirect_uri = cfg["web"]["redirect_uris"][0]
+    # Calcula `end` se necessário
+    if not end:
+        if not duration_minutes:
+            raise GoogleCalendarError("Informe `end` ou `duration_minutes`.")
+        try:
+            start_dt = dt.datetime.fromisoformat(start)
+        except Exception as e:
+            raise GoogleCalendarError(f"`start` inválido: {e}")
+        end_dt = start_dt + dt.timedelta(minutes=duration_minutes)
+        end = end_dt.isoformat()
+
+    event: Dict[str, Any] = {
+        "summary": title,
+        "description": description or "",
+        "location": location or "",
+        "start": {"dateTime": start, "timeZone": timezone},
+        "end": {"dateTime": end, "timeZone": timezone},
+    }
+    if attendees:
+        event["attendees"] = attendees
+
     try:
-        masked = {
-            "client_id_prefix": cfg["web"]["client_id"][:8],
-            "client_id_suffix": cfg["web"]["client_id"][-10:],
-            "has_secret": bool(cfg["web"]["client_secret"]),
-            "redirect_uris": cfg["web"]["redirect_uris"],
-            "scopes": SCOPES,
-        }
-        flow = Flow.from_client_config(cfg, scopes=SCOPES)
-        flow.redirect_uri = redirect_uri
-        auth_url, _ = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes='true',
-            prompt="consent",
+        service = _build_service()
+        created = (
+            service.events()
+            .insert(calendarId=_calendar_id(), body=event, sendUpdates="all")
+            .execute()
         )
-        return {"config": masked, "auth_url": auth_url}
+        return {
+            "id": created.get("id"),
+            "status": created.get("status"),
+            "htmlLink": created.get("htmlLink"),
+        }
+    except GoogleCalendarError:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Debug falhou: {e}")
+        raise GoogleCalendarError(f"Falha ao criar evento no Google Calendar: {e}")
