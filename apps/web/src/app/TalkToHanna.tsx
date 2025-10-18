@@ -44,7 +44,7 @@ export default function TalkToHanna() {
 
   // --- Agenda intent state (unificado no hotword) ---
   const pendingConfirmRef = useRef<string | null>(null);
-  const [awaitingAgendaCmd, setAwaitingAgendaCmd] = useState(false);
+  const awaitingAgendaRef = useRef(false);
 
   // ---------- Config from ENV (with sane fallbacks) ----------
   const MODEL =
@@ -94,6 +94,7 @@ export default function TalkToHanna() {
       pendingConfirmRef.current = token;
       // mantenha o mic aberto visualmente durante a coleta
       setMicGate(true);
+      awaitingAgendaRef.current = true;
       // Modo de confirmação contínuo: mantém o mic aberto até silêncio (3.5s)
       captureWindow(
         3500,
@@ -118,16 +119,13 @@ export default function TalkToHanna() {
         },
         () => {
           // silêncio detectado → fecha o gate de mic
+          awaitingAgendaRef.current = false;
           setMicGate(false);
         }
       );
       return;
     }
-
-    // Caso normal: nada a esperar — feche o gate depois de alguns segundos
-    if (micActive) {
-      setTimeout(() => setMicGate(false), 1200);
-    }
+    awaitingAgendaRef.current = false;
   }
 
   function captureOnce(onText: (t: string) => void) {
@@ -266,6 +264,7 @@ export default function TalkToHanna() {
       localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
+    awaitingAgendaRef.current = false;
     setMicGate(false);
   }
 
@@ -371,13 +370,13 @@ export default function TalkToHanna() {
       if (/\bhanna\b/.test(text)) {
         setStatus("Hotword detectada: microfone liberado");
         setMicGate(true);
-        setAwaitingAgendaCmd(true);
+        awaitingAgendaRef.current = true;
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
         // Janela natural baseada em silêncio: mantém aberto enquanto houver fala
         captureWindow(
           3500,
           async (cmd) => {
-            if (!awaitingAgendaCmd) return;
+            if (!awaitingAgendaRef.current) return;
             if (pendingConfirmRef.current) return; // aguardando follow‑up
             const normalized = cmd.trim();
             // Envia tudo: o backend decide se é chat (noop) ou agenda
@@ -386,7 +385,7 @@ export default function TalkToHanna() {
           () => {
             // encerrado por silêncio
             setMicGate(false);
-            setAwaitingAgendaCmd(false);
+            awaitingAgendaRef.current = false;
             setStatus("Aguardando chamar 'Hanna'…");
           }
         );

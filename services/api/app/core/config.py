@@ -31,7 +31,7 @@ class Settings(BaseModel):
     google_impersonated_user: Optional[str] = os.getenv("GOOGLE_IMPERSONATED_USER")
     calendar_default_timezone: str = os.getenv(
         "CALENDAR_DEFAULT_TIMEZONE",
-        "America/Sao_Paulo",
+        "America/New_York",
     )
     calendar_default_duration_minutes: int = int(
         os.getenv("CALENDAR_DEFAULT_DURATION_MINUTES", "60")

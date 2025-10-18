@@ -149,6 +149,23 @@ def _guess_title(text: str) -> str:
     m = re.search(r"(reuni[aã]o|visita|orçamento|orcamento|reparo|call|meeting)", text, re.I)
     return m.group(0).capitalize() if m else "Compromisso"
 
+def _build_title(text: str) -> str:
+    guess = _guess_title(text)
+    if guess and guess != "Compromisso":
+        return guess
+
+    # Remove hotword e cumprimentos para usar parte útil da frase
+    cleaned = re.sub(r"\b(hanna|oi|ol[áa]|bom\s*dia|boa\s*tarde|boa\s*noite)\b[:,]?\s*", "", text, flags=re.I)
+    cleaned = cleaned.strip(" .,!?:;-")
+    if not cleaned:
+        return "Compromisso"
+
+    # Limita tamanho para o resumo do evento
+    trimmed = cleaned[:60].strip()
+    if not trimmed:
+        return "Compromisso"
+    return trimmed[0].upper() + trimmed[1:]
+
 def _extract_location(text: str) -> Optional[str]:
     m = re.search(r"\b(no|na|em)\s+([A-Za-z0-9çãáéíóúâêô\-\s]+)", text, re.I)
     if m:
@@ -157,6 +174,14 @@ def _extract_location(text: str) -> Optional[str]:
         if not re.search(r"(amanh[ãa]|às|as\s|\bhoje\b|\bdia\b|\d{1,2}/\d{1,2})", loc, re.I):
             return loc[:100]
     return None
+
+def _resolve_duration_minutes(text: str) -> int:
+    parsed = _parse_duration_minutes(text)
+    if parsed and parsed > 0:
+        return parsed
+
+    fallback = getattr(settings, "calendar_default_duration_minutes", 60) or 60
+    return fallback if fallback > 0 else 60
 
 def _extract_attendees(text: str) -> Optional[List[Dict[str, Any]]]:
     emails = re.findall(r"[\w\.\-\+]+@[\w\.\-]+\.\w+", text)
@@ -273,10 +298,10 @@ def handle_voice(cmd: VoiceCommand):
         return EventResponse(ok=True, message="; ".join(lines), details={"events": items})
 
     # intent == "create"
-    title = _guess_title(text)
+    title = _build_title(text)
     location = _extract_location(text)
     attendees = _extract_attendees(text)
-    duration = _parse_duration_minutes(text)
+    duration = _resolve_duration_minutes(text)
 
     when = _parse_when(text, tz)
     slots = {
@@ -289,11 +314,12 @@ def handle_voice(cmd: VoiceCommand):
 
     # coleta progressiva
     if not when:
-        return _pending_slots_reply(slots, tz, text, "Claro. Para quando é? Diga algo como: amanhã às 9.")
-    if duration is None:
-        return _pending_slots_reply(slots, tz, text, "Perfeito. Qual a duração? Pode dizer 30 minutos, 1 hora, 1h30…")
-    if not title or title == "Compromisso":
-        return _pending_slots_reply(slots, tz, text, "Fechado. Qual o título? Ex.: Reunião de orçamento.")
+        return _pending_slots_reply(
+            slots,
+            tz,
+            text,
+            "Claro. Para quando é esse compromisso?",
+        )
 
     start = when
     end = when + timedelta(minutes=duration)
@@ -341,7 +367,8 @@ def handle_voice(cmd: VoiceCommand):
             attendees=attendees,
         )
         link = res.get("htmlLink")
-        when_pt = start.strftime("%d/%m %H:%M")
+        local_start = start.astimezone(tz)
+        when_pt = local_start.strftime("%d/%m %H:%M")
         return EventResponse(
             ok=True,
             message=f"Pronto! Marquei {title} para {when_pt} ({tz.key}).",
@@ -408,8 +435,9 @@ def confirm_voice(body: ConfirmBody):
 
         # Slot filling: completar dados faltantes a partir de body.text
         if intent == "create_event":
-            slots = payload.get("slots", {})
+            slots = dict(payload.get("slots", {}))
             user_text = body.text or ""
+            combined_text = f"{payload.get('original_text', '')} {user_text}".strip()
 
             # se usuário disse "não", cancela
             if body.confirm is False or re.search(r"\b(n[aã]o|cancela|deixa)\b", user_text, re.I):
@@ -417,13 +445,9 @@ def confirm_voice(body: ConfirmBody):
 
             # tenta completar slots
             if not slots.get("title") or slots.get("title") == "Compromisso":
-                t = _guess_title(user_text)
-                if t and t != "Compromisso":
-                    slots["title"] = t
+                slots["title"] = _build_title(combined_text or user_text or payload.get("original_text", ""))
             if not slots.get("duration"):
-                d = _parse_duration_minutes(user_text)
-                if d:
-                    slots["duration"] = d
+                slots["duration"] = _resolve_duration_minutes(combined_text or user_text or payload.get("original_text", ""))
             if not slots.get("start_iso"):
                 w = _parse_when(user_text, tz)
                 if w:
@@ -440,25 +464,34 @@ def confirm_voice(body: ConfirmBody):
             # Ainda faltando algo?
             if not slots.get("start_iso"):
                 return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "Certo. Para quando é?")
-            if not slots.get("duration"):
-                return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "Qual a duração? 30 minutos, 1 hora…")
             if not slots.get("title") or slots.get("title") == "Compromisso":
-                return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "E o título do evento?")
+                slots["title"] = _build_title(combined_text or user_text or payload.get("original_text", ""))
+                if not slots["title"]:
+                    return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "E o título do evento?")
 
             # Tudo pronto → criar
             start = datetime.fromisoformat(slots["start_iso"]).astimezone(tz)
+            duration_minutes = int(
+                slots.get("duration")
+                or _resolve_duration_minutes(combined_text or user_text or payload.get("original_text", ""))
+            )
             res = create_calendar_event(
                 title=slots["title"],
                 description=f"Criado por voz: “{payload.get('original_text','')} / {user_text}”.",
                 location=slots.get("location"),
                 start=start,
                 end=None,
-                duration_minutes=int(slots.get("duration", 60)),
+                duration_minutes=duration_minutes,
                 timezone=tz.key,
                 attendees=slots.get("attendees"),
             )
             link = res.get("htmlLink")
-            return EventResponse(ok=True, message=f"Pronto! Marquei {slots['title']} para {start.strftime('%d/%m %H:%M')} ({tz.key}).", details={"event": res, "link": link})
+            when_label = start.strftime('%d/%m %H:%M')
+            return EventResponse(
+                ok=True,
+                message=f"Pronto! Marquei {slots['title']} para {when_label} ({tz.key}).",
+                details={"event": res, "link": link},
+            )
 
         # fallback
         return EventResponse(ok=False, message="Não consegui processar essa confirmação agora.")
