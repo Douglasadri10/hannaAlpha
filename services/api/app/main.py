@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.routers import session, tool, feedback
 from app.routers.google_calendar import router as google_router
+from app.routers import voice
 
 # Garante que o FastAPI ache os módulos (app/...)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -46,3 +47,5 @@ app.include_router(session.router, tags=["realtime"])
 app.include_router(tool.router, tags=["tools"])
 app.include_router(feedback.router, tags=["feedback"])
 app.include_router(google_router, prefix="/google", tags=["google"])
+app.include_router(voice.router)
+
