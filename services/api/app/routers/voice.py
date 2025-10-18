@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import os
 import re
 import base64
+import logging
 
 import dateparser
 from dateparser.search import search_dates
@@ -16,6 +17,7 @@ from app.services.google_calendar import GoogleCalendarError
 from app.core.config import settings
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+logger = logging.getLogger("voice")
 
 # --- Configuração de fuso e contatos (MVP) ---
 DEFAULT_TZ = settings.calendar_default_timezone or "America/New_York"
@@ -258,11 +260,16 @@ def handle_voice(cmd: VoiceCommand):
     start = when
     end = when + timedelta(minutes=duration)
 
+    # Guard conflict detection so it never 500s the route
+    try:
+        conflicts = _find_conflicts(start, end, tz)
+    except Exception as e:
+        logger.exception("find_conflicts failed")
+        conflicts = []
+
     # Se o usuário já disse algo como "confirmo/mesmo assim", força a criação
     force = bool(CONFIRM_PAT.search(text))
 
-    # Checa conflitos antes de criar
-    conflicts = _find_conflicts(start, end, tz)
     if conflicts and not force:
         ev, sdt, edt = conflicts[0]
         t = ev.get("summary", "Compromisso")
@@ -304,6 +311,9 @@ def handle_voice(cmd: VoiceCommand):
         )
     except GoogleCalendarError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("voice.handle unexpected error")
+        raise HTTPException(status_code=500, detail=f"voice.handle error: {type(e).__name__}: {e}")
 
 
 # ====== LISTAGEM DE AGENDA (MVP) ======
@@ -355,4 +365,5 @@ def confirm_voice(body: ConfirmBody):
             details={"event": res, "link": link},
         )
     except Exception as e:
+        logger.exception("voice.confirm token decode/create failed")
         raise HTTPException(status_code=400, detail=f"Token inválido ou expirado: {e}")
