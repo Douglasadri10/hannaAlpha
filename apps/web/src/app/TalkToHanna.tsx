@@ -94,26 +94,33 @@ export default function TalkToHanna() {
       pendingConfirmRef.current = token;
       // mantenha o mic aberto visualmente durante a coleta
       setMicGate(true);
-      // Captura livre (uma frase final) e envia para /voice/confirm com o texto
-      captureOnce(async (ans) => {
-        try {
-          const resp = await fetch(`${API_BASE}/voice/confirm`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              confirmation_token: pendingConfirmRef.current,
-              text: ans,
-            }),
-          });
-          const follow = await resp.json();
-          // Recursivo: se ainda faltar algo, ele volta com expecting_input true
-          await processServerReply(follow);
-        } catch (err) {
-          console.warn("confirm error", err);
-        } finally {
-          pendingConfirmRef.current = null;
+      // Modo de confirmação contínuo: mantém o mic aberto até silêncio (3.5s)
+      captureWindow(
+        3500,
+        async (ans) => {
+          try {
+            const resp = await fetch(`${API_BASE}/voice/confirm`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                confirmation_token: pendingConfirmRef.current,
+                text: ans,
+              }),
+            });
+            const follow = await resp.json();
+            // Recursivo: se ainda faltar algo, ele volta com expecting_input true
+            await processServerReply(follow);
+          } catch (err) {
+            console.warn("confirm error", err);
+          } finally {
+            pendingConfirmRef.current = null;
+          }
+        },
+        () => {
+          // silêncio detectado → fecha o gate de mic
+          setMicGate(false);
         }
-      });
+      );
       return;
     }
 
@@ -142,7 +149,11 @@ export default function TalkToHanna() {
     } catch {}
   }
 
-  function captureWindow(seconds: number, onFinalText: (t: string) => void) {
+  function captureWindow(
+    silenceMs: number,
+    onFinalText: (t: string) => void,
+    onStop?: () => void
+  ) {
     const SR: any =
       (window as any).webkitSpeechRecognition ||
       (window as any).SpeechRecognition;
@@ -153,24 +164,24 @@ export default function TalkToHanna() {
     rec.maxAlternatives = 1;
     rec.continuous = true;
 
-    let timeoutId: number | null = null;
-
-    const armTimeout = () => {
-      if (timeoutId) window.clearTimeout(timeoutId);
-      timeoutId = window.setTimeout(() => {
+    let silenceTimer: number | null = null;
+    const armSilence = () => {
+      if (silenceTimer) window.clearTimeout(silenceTimer);
+      silenceTimer = window.setTimeout(() => {
         try {
           rec.stop();
         } catch {}
-      }, Math.max(1000, seconds * 1000));
+      }, Math.max(1000, silenceMs));
     };
 
     rec.onresult = (ev: any) => {
       const res = ev.results[ev.resultIndex];
       if (!res) return;
+      // qualquer fala reinicia o timer de silêncio
+      armSilence();
       if (res.isFinal) {
         const t = (res[0]?.transcript || "").trim();
         if (t) onFinalText(t);
-        armTimeout(); // reinicia janela após cada final
       }
     };
 
@@ -181,12 +192,13 @@ export default function TalkToHanna() {
     };
 
     rec.onend = () => {
-      if (timeoutId) window.clearTimeout(timeoutId);
+      if (silenceTimer) window.clearTimeout(silenceTimer);
+      onStop?.();
     };
 
     try {
       rec.start();
-      armTimeout();
+      armSilence();
     } catch {}
   }
   // Palavras-chave para reconhecer intenção de agenda (cliente)
@@ -357,23 +369,27 @@ export default function TalkToHanna() {
 
       // Palavra exata apenas: 'hanna'
       if (/\bhanna\b/.test(text)) {
-        setStatus("Hotword detectada: microfone liberado por 10s");
+        setStatus("Hotword detectada: microfone liberado");
         setMicGate(true);
         setAwaitingAgendaCmd(true);
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
-        // Janela de fala natural (10s): envia todas as frases, backend decide
-        captureWindow(8, async (cmd) => {
-          if (!awaitingAgendaCmd) return;
-          if (pendingConfirmRef.current) return; // aguardando follow‑up
-          const normalized = cmd.trim();
-          // Envia tudo: o backend decide se é chat (noop) ou agenda
-          await handleAgendaText(normalized);
-        });
-        wakeTimerRef.current = window.setTimeout(() => {
-          setMicGate(false);
-          setAwaitingAgendaCmd(false);
-          setStatus("Aguardando chamar 'Hanna'…");
-        }, 10000);
+        // Janela natural baseada em silêncio: mantém aberto enquanto houver fala
+        captureWindow(
+          3500,
+          async (cmd) => {
+            if (!awaitingAgendaCmd) return;
+            if (pendingConfirmRef.current) return; // aguardando follow‑up
+            const normalized = cmd.trim();
+            // Envia tudo: o backend decide se é chat (noop) ou agenda
+            await handleAgendaText(normalized);
+          },
+          () => {
+            // encerrado por silêncio
+            setMicGate(false);
+            setAwaitingAgendaCmd(false);
+            setStatus("Aguardando chamar 'Hanna'…");
+          }
+        );
       }
     };
 
