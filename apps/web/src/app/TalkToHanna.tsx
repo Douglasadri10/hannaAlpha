@@ -1,5 +1,11 @@
 "use client";
+
 import { useEffect, useRef, useState } from "react";
+
+const tz =
+  (typeof window !== "undefined" &&
+    (Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York")) ||
+  "America/New_York";
 
 // Loose typings for Web Speech API (browser-provided)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -36,6 +42,10 @@ export default function TalkToHanna() {
   // Gating state
   const [micActive, setMicActive] = useState(false);
 
+  // --- Agenda intent state (unificado no hotword) ---
+  const pendingConfirmRef = useRef<string | null>(null);
+  const [awaitingAgendaCmd, setAwaitingAgendaCmd] = useState(false);
+
   // ---------- Config from ENV (with sane fallbacks) ----------
   const MODEL =
     process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL ||
@@ -55,6 +65,110 @@ export default function TalkToHanna() {
   // join helper
   const api = (path: string) =>
     `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
+
+  async function handleAgendaText(text: string) {
+    try {
+      const res = await fetch(`${API_BASE}/voice/handle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, timezone: tz }),
+      });
+      const data = await res.json();
+      // Se precisar confirmar, armamos o próximo reconhecimento para sim/não
+      if (
+        data?.details?.needs_confirmation &&
+        data?.details?.confirmation_token
+      ) {
+        pendingConfirmRef.current = data.details.confirmation_token;
+        // inicia uma captura curta para "sim"/"não"
+        captureOnce(async (ans) => {
+          const ok = /(sim|pode marcar|confirmo|ok)/i.test(ans);
+          await fetch(`${API_BASE}/voice/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              confirmation_token: pendingConfirmRef.current,
+              confirm: ok,
+            }),
+          }).catch(() => undefined);
+          pendingConfirmRef.current = null;
+        });
+      }
+    } catch (e) {
+      // silencioso — a voz Realtime já responde ao usuário; ação acontece no back
+      console.warn("agenda handle error", e);
+    }
+  }
+
+  function captureOnce(onText: (t: string) => void) {
+    const SR: any =
+      (window as any).webkitSpeechRecognition ||
+      (window as any).SpeechRecognition;
+    if (!SR) return;
+    const rec: any = new SR();
+    rec.lang = "pt-BR";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.continuous = false;
+    rec.onresult = (ev: any) => {
+      const transcript = ev.results?.[0]?.[0]?.transcript?.trim();
+      if (transcript) onText(transcript);
+    };
+    try {
+      rec.start();
+    } catch {}
+  }
+
+  function captureWindow(seconds: number, onFinalText: (t: string) => void) {
+    const SR: any =
+      (window as any).webkitSpeechRecognition ||
+      (window as any).SpeechRecognition;
+    if (!SR) return;
+    const rec: any = new SR();
+    rec.lang = "pt-BR";
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    rec.continuous = true;
+
+    let timeoutId: number | null = null;
+
+    const armTimeout = () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => {
+        try {
+          rec.stop();
+        } catch {}
+      }, Math.max(1000, seconds * 1000));
+    };
+
+    rec.onresult = (ev: any) => {
+      const res = ev.results[ev.resultIndex];
+      if (!res) return;
+      if (res.isFinal) {
+        const t = (res[0]?.transcript || "").trim();
+        if (t) onFinalText(t);
+        armTimeout(); // reinicia janela após cada final
+      }
+    };
+
+    rec.onerror = () => {
+      try {
+        rec.stop();
+      } catch {}
+    };
+
+    rec.onend = () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+
+    try {
+      rec.start();
+      armTimeout();
+    } catch {}
+  }
+  // Palavras-chave para reconhecer intenção de agenda (cliente)
+  const AGENDA_INTENT =
+    /(marc(a|ar)|agend(a|ar)|reuni(ão|ao)|visita|orçamento|orcamento|compromissos?|agenda|calend[aá]rio)/i;
 
   // ---------- Helpers ----------
   function attachRemoteAudio(peer: RTCPeerConnection) {
@@ -220,13 +334,24 @@ export default function TalkToHanna() {
 
       // Palavra exata apenas: 'hanna'
       if (/\bhanna\b/.test(text)) {
-        setStatus("Hotword detectada: microfone liberado por 4s");
+        setStatus("Hotword detectada: microfone liberado por 8s");
         setMicGate(true);
+        setAwaitingAgendaCmd(true);
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
+        // Janela de fala natural (8s): envia somente frases que parecem intenção de agenda
+        captureWindow(8, async (cmd) => {
+          if (!awaitingAgendaCmd) return;
+          if (pendingConfirmRef.current) return; // aguardando sim/não
+          const normalized = cmd.trim();
+          if (AGENDA_INTENT.test(normalized)) {
+            await handleAgendaText(normalized);
+          }
+        });
         wakeTimerRef.current = window.setTimeout(() => {
           setMicGate(false);
+          setAwaitingAgendaCmd(false);
           setStatus("Aguardando chamar 'Hanna'…");
-        }, 4000);
+        }, 8000);
       }
     };
 
@@ -416,7 +541,9 @@ export default function TalkToHanna() {
           peer.iceConnectionState === "completed"
         ) {
           setConnected(true);
-          setStatus(`Conectado. Voz: ${VOICE}. Diga: “Hanna, …” ou use PTT.`);
+          setStatus(
+            `Conectado. Diga: “Hanna, …” e fale naturalmente (agenda inclusa).`
+          );
         }
         if (
           peer.iceConnectionState === "disconnected" ||
