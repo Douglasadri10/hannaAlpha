@@ -1,4 +1,4 @@
-"""Utilities for interacting with Google Calendar."""
+"""Utilities for interacting with Google Calendar (OAuth user creds)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials  # OAuth user creds
+from google.auth.transport.requests import Request
 
 from app.core.config import settings
 
@@ -22,22 +23,75 @@ class GoogleCalendarError(RuntimeError):
     """Custom error raised when we cannot interact with Google Calendar."""
 
 
-@lru_cache(maxsize=1)
-def _load_credentials() -> Credentials:
-    """Load service-account credentials from disk."""
+def _creds_path() -> str:
     path = settings.google_credentials_path
     if not path:
         raise GoogleCalendarError("GOOGLE_CREDENTIALS_JSON_PATH não configurada.")
-    if not os.path.exists(path):
-        raise GoogleCalendarError(f"Arquivo de credenciais não encontrado: {path}")
+    return path
 
-    try:
-        creds = Credentials.from_service_account_file(path, scopes=SCOPES)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise GoogleCalendarError("Credenciais Google inválidas.") from exc
 
-    if settings.google_impersonated_user:
-        creds = creds.with_subject(settings.google_impersonated_user)
+def _load_oauth_user_credentials() -> Credentials:
+    """Load OAuth *user* credentials saved by the OAuth callback.
+
+    First tries to read the JSON file pointed by GOOGLE_CREDENTIALS_JSON_PATH.
+    If the file does not exist but the env var GOOGLE_CREDENTIALS_JSON is set
+    with a valid JSON payload, it will parse that payload, write it to the
+    configured path, and use it. The JSON must contain: token, token_uri,
+    client_id, client_secret, scopes. Optionally includes refresh_token.
+    """
+    path = _creds_path()
+
+    data: dict[str, Any] | None = None
+
+    # 1) Primary source: file on disk (preferred/persistent when using a Render Disk)
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise GoogleCalendarError("Credenciais Google inválidas (JSON).") from exc
+    else:
+        # 2) Fallback: env var with the full JSON (useful when a disk is not attached)
+        raw = getattr(settings, "google_credentials_json", None)
+        if raw:
+            try:
+                data = json.loads(raw)
+                # Try to persist it so next calls find the file
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    json.dump(data, f)
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise GoogleCalendarError("GOOGLE_CREDENTIALS_JSON inválido (não é JSON).") from exc
+        else:
+            raise GoogleCalendarError(
+                f"Arquivo de credenciais não encontrado: {path}. Autorize em /google/oauth/start.")
+
+    required = ["token", "token_uri", "client_id", "client_secret", "scopes"]
+    missing = [k for k in required if not data.get(k)]  # type: ignore[arg-type]
+    if missing:
+        raise GoogleCalendarError(
+            "Credenciais Google inválidas. Faltando: " + ", ".join(missing)
+        )
+
+    creds = Credentials(
+        token=data.get("token"),  # type: ignore[arg-type]
+        refresh_token=data.get("refresh_token"),  # type: ignore[arg-type]
+        token_uri=data["token_uri"],  # type: ignore[index]
+        client_id=data["client_id"],  # type: ignore[index]
+        client_secret=data["client_secret"],  # type: ignore[index]
+        scopes=data["scopes"],  # type: ignore[index]
+    )
+
+    # Refresh if needed and persist updated access token
+    if not creds.valid and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            data["token"] = creds.token  # type: ignore[index]
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(data, f)
+        except Exception as exc:
+            raise GoogleCalendarError(f"Falha ao renovar token: {exc}") from exc
 
     return creds
 
@@ -45,9 +99,8 @@ def _load_credentials() -> Credentials:
 @lru_cache(maxsize=1)
 def _get_calendar_id() -> str:
     calendar_id = settings.google_calendar_id.strip() if settings.google_calendar_id else ""
-    if not calendar_id:
-        raise GoogleCalendarError("Configure GOOGLE_CALENDAR_ID com o ID do calendário ou e-mail.")
-    return calendar_id
+    # default to primary if not configured
+    return calendar_id or "primary"
 
 
 def _ensure_timezone(dt: datetime, tz_name: Optional[str]) -> Tuple[datetime, str]:
@@ -123,8 +176,8 @@ def create_calendar_event(
     if attendees:
         event_body["attendees"] = attendees
 
-    creds = _load_credentials()
     try:
+        creds = _load_oauth_user_credentials()
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
         result = (
             service.events()
