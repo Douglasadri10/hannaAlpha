@@ -74,29 +74,52 @@ export default function TalkToHanna() {
         body: JSON.stringify({ text, timezone: tz }),
       });
       const data = await res.json();
-      // Se precisar confirmar, armamos o próximo reconhecimento para sim/não
-      if (
-        data?.details?.needs_confirmation &&
-        data?.details?.confirmation_token
-      ) {
-        pendingConfirmRef.current = data.details.confirmation_token;
-        // inicia uma captura curta para "sim"/"não"
-        captureOnce(async (ans) => {
-          const ok = /(sim|pode marcar|confirmo|ok)/i.test(ans);
-          await fetch(`${API_BASE}/voice/confirm`, {
+      await processServerReply(data);
+    } catch (e) {
+      console.warn("agenda handle error", e);
+    }
+  }
+
+  async function processServerReply(data: any) {
+    // Se o backend sinaliza para não interferir (chit-chat), apenas ignore
+    if (data?.details?.noop) return;
+
+    // Se houver necessidade de confirmação OU de completar slots
+    const expecting = Boolean(
+      data?.expecting_input || data?.details?.needs_confirmation
+    );
+    const token = data?.details?.confirmation_token || data?.confirmation_token;
+
+    if (expecting && token) {
+      pendingConfirmRef.current = token;
+      // mantenha o mic aberto visualmente durante a coleta
+      setMicGate(true);
+      // Captura livre (uma frase final) e envia para /voice/confirm com o texto
+      captureOnce(async (ans) => {
+        try {
+          const resp = await fetch(`${API_BASE}/voice/confirm`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               confirmation_token: pendingConfirmRef.current,
-              confirm: ok,
+              text: ans,
             }),
-          }).catch(() => undefined);
+          });
+          const follow = await resp.json();
+          // Recursivo: se ainda faltar algo, ele volta com expecting_input true
+          await processServerReply(follow);
+        } catch (err) {
+          console.warn("confirm error", err);
+        } finally {
           pendingConfirmRef.current = null;
-        });
-      }
-    } catch (e) {
-      // silencioso — a voz Realtime já responde ao usuário; ação acontece no back
-      console.warn("agenda handle error", e);
+        }
+      });
+      return;
+    }
+
+    // Caso normal: nada a esperar — feche o gate depois de alguns segundos
+    if (micActive) {
+      setTimeout(() => setMicGate(false), 1200);
     }
   }
 
@@ -334,24 +357,23 @@ export default function TalkToHanna() {
 
       // Palavra exata apenas: 'hanna'
       if (/\bhanna\b/.test(text)) {
-        setStatus("Hotword detectada: microfone liberado por 8s");
+        setStatus("Hotword detectada: microfone liberado por 10s");
         setMicGate(true);
         setAwaitingAgendaCmd(true);
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
-        // Janela de fala natural (8s): envia somente frases que parecem intenção de agenda
+        // Janela de fala natural (10s): envia todas as frases, backend decide
         captureWindow(8, async (cmd) => {
           if (!awaitingAgendaCmd) return;
-          if (pendingConfirmRef.current) return; // aguardando sim/não
+          if (pendingConfirmRef.current) return; // aguardando follow‑up
           const normalized = cmd.trim();
-          if (AGENDA_INTENT.test(normalized)) {
-            await handleAgendaText(normalized);
-          }
+          // Envia tudo: o backend decide se é chat (noop) ou agenda
+          await handleAgendaText(normalized);
         });
         wakeTimerRef.current = window.setTimeout(() => {
           setMicGate(false);
           setAwaitingAgendaCmd(false);
           setStatus("Aguardando chamar 'Hanna'…");
-        }, 8000);
+        }, 10000);
       }
     };
 

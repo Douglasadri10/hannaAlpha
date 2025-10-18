@@ -43,16 +43,21 @@ class VoiceCommand(BaseModel):
 class EventResponse(BaseModel):
     ok: bool
     message: str
+    expecting_input: Optional[bool] = None
     details: Optional[Dict[str, Any]] = None
 
 # --- New ConfirmBody model ---
 class ConfirmBody(BaseModel):
     confirmation_token: str
-    confirm: bool = True
+    confirm: Optional[bool] = None
+    text: Optional[str] = None  # livre: "Reunião de orçamento 90 minutos", "sim", "não"
 
 # --- Helpers ---
 VERBS_CREATE = ("marca", "marcar", "agenda", "agendar")
 ASK_AGENDA_PAT = re.compile(r"(próxim[oa]s?\s+compromissos?|agenda|meus\s+compromissos)", re.I)
+
+# Chit-chat detector
+CHITCHAT_PAT = re.compile(r"\b(oi|ol[aá]|bom\s*dia|boa\s*tarde|boa\s*noite|tudo\s*bem|como\s*v[aã]i)\b", re.I)
 
 # --- Confirmation regex pattern ---
 CONFIRM_PAT = re.compile(r"(confirmo|pode marcar|mesmo assim|força|pode seguir|pode criar)", re.I)
@@ -170,12 +175,13 @@ def _extract_attendees(text: str) -> Optional[List[Dict[str, Any]]]:
 
 def _intent(text: str) -> str:
     t = text.lower()
-    if any(v in t for v in VERBS_CREATE):
+    if CHITCHAT_PAT.search(t):
+        return "chat"
+    if any(v in t for v in VERBS_CREATE) or _parse_when(t, _tz(None)):
         return "create"
     if ASK_AGENDA_PAT.search(t):
         return "agenda"
-    # fallback: se tem algo que se parece com data/horário, tendemos a "create"
-    return "create" if _parse_when(t, _tz(None)) else "agenda"
+    return "chat"
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -215,6 +221,21 @@ def _decode_token(token: str) -> Dict[str, Any]:
     return json.loads(base64.urlsafe_b64decode(token.encode()).decode())
 
 # --- Rotas ---
+def _pending_slots_reply(slots: Dict[str, Any], tz: ZoneInfo, original_text: str, ask: str) -> EventResponse:
+    token = _encode_token({
+        "intent": "create_event",
+        "slots": slots,
+        "tz": tz.key,
+        "original_text": original_text,
+    })
+    return EventResponse(
+        ok=True,
+        message=ask,
+        expecting_input=True,
+        details={"needs_input": True, "confirmation_token": token},
+    )
+
+# --- Rotas ---
 @router.post("/handle", response_model=EventResponse)
 def handle_voice(cmd: VoiceCommand):
     """
@@ -225,6 +246,10 @@ def handle_voice(cmd: VoiceCommand):
     text = cmd.text.strip()
     intent = _intent(text)
     tz = _tz(cmd.timezone)
+
+    if intent == "chat":
+        # Não interferimos: deixa o cliente Realtime responder normalmente
+        return EventResponse(ok=True, message="", expecting_input=False, details={"noop": True})
 
     if intent == "agenda":
         # Hoje ou amanhã?
@@ -251,11 +276,24 @@ def handle_voice(cmd: VoiceCommand):
     title = _guess_title(text)
     location = _extract_location(text)
     attendees = _extract_attendees(text)
-    duration = _parse_duration_minutes(text) or 60
+    duration = _parse_duration_minutes(text)
 
     when = _parse_when(text, tz)
+    slots = {
+        "title": title if title else None,
+        "location": location,
+        "attendees": attendees,
+        "duration": duration,
+        "start_iso": when.isoformat() if when else None,
+    }
+
+    # coleta progressiva
     if not when:
-        raise HTTPException(status_code=400, detail="Não entendi a data/horário. Tente: 'amanhã às 9h' ou 'dia 20 às 15h'.")
+        return _pending_slots_reply(slots, tz, text, "Claro. Para quando é? Diga algo como: amanhã às 9.")
+    if duration is None:
+        return _pending_slots_reply(slots, tz, text, "Perfeito. Qual a duração? Pode dizer 30 minutos, 1 hora, 1h30…")
+    if not title or title == "Compromisso":
+        return _pending_slots_reply(slots, tz, text, "Fechado. Qual o título? Ex.: Reunião de orçamento.")
 
     start = when
     end = when + timedelta(minutes=duration)
@@ -306,7 +344,7 @@ def handle_voice(cmd: VoiceCommand):
         when_pt = start.strftime("%d/%m %H:%M")
         return EventResponse(
             ok=True,
-            message=f"{title} marcado para {when_pt} ({tz.key}).",
+            message=f"Pronto! Marquei {title} para {when_pt} ({tz.key}).",
             details={"event": res, "link": link},
         )
     except GoogleCalendarError as e:
@@ -339,31 +377,91 @@ def _list_events_day(day: date, tz: ZoneInfo):
     return events_result.get("items", [])
 
 
-# --- Confirm pending event creation ---
+# --- Confirm pending event creation and slot completion ---
 @router.post("/confirm", response_model=EventResponse)
 def confirm_voice(body: ConfirmBody):
-    if not body.confirm:
-        return EventResponse(ok=True, message="Ok, não vou criar esse evento agora.")
     try:
         data = _decode_token(body.confirmation_token)
         tz = _tz(data.get("tz"))
-        start = datetime.fromisoformat(data["start_iso"])
-        res = create_calendar_event(
-            title=data["title"],
-            description=f"Criado por voz (confirmado): “{data.get('original_text','')}”.",
-            location=data.get("location"),
-            start=start,
-            end=None,
-            duration_minutes=int(data.get("duration", 60)),
-            timezone=tz.key,
-            attendees=data.get("attendees"),
-        )
-        link = res.get("htmlLink")
-        return EventResponse(
-            ok=True,
-            message=f"Confirmado. Evento criado para {start.strftime('%d/%m %H:%M')} ({tz.key}).",
-            details={"event": res, "link": link},
-        )
+        payload = data if isinstance(data, dict) else {}
+        intent = payload.get("intent")
+
+        # Se o token veio de conflito (nosso fluxo atual marca needs_confirmation em handle)
+        if payload.get("start_iso") and not payload.get("slots") and (body.confirm is not None or body.text):
+            confirm_text = (body.text or "").lower()
+            confirmed = body.confirm is True or bool(CONFIRM_PAT.search(confirm_text))
+            if not confirmed:
+                return EventResponse(ok=True, message="Ok, não vou criar esse evento agora.")
+            start = datetime.fromisoformat(payload["start_iso"]).astimezone(tz)
+            res = create_calendar_event(
+                title=payload.get("title", "Compromisso"),
+                description=f"Criado por voz (confirmado): “{payload.get('original_text','')}”.",
+                location=payload.get("location"),
+                start=start,
+                end=None,
+                duration_minutes=int(payload.get("duration", 60)),
+                timezone=tz.key,
+                attendees=payload.get("attendees"),
+            )
+            link = res.get("htmlLink")
+            return EventResponse(ok=True, message=f"Confirmado. Evento criado para {start.strftime('%d/%m %H:%M')} ({tz.key}).", details={"event": res, "link": link})
+
+        # Slot filling: completar dados faltantes a partir de body.text
+        if intent == "create_event":
+            slots = payload.get("slots", {})
+            user_text = body.text or ""
+
+            # se usuário disse "não", cancela
+            if body.confirm is False or re.search(r"\b(n[aã]o|cancela|deixa)\b", user_text, re.I):
+                return EventResponse(ok=True, message="Beleza, não vou criar esse evento agora.")
+
+            # tenta completar slots
+            if not slots.get("title") or slots.get("title") == "Compromisso":
+                t = _guess_title(user_text)
+                if t and t != "Compromisso":
+                    slots["title"] = t
+            if not slots.get("duration"):
+                d = _parse_duration_minutes(user_text)
+                if d:
+                    slots["duration"] = d
+            if not slots.get("start_iso"):
+                w = _parse_when(user_text, tz)
+                if w:
+                    slots["start_iso"] = w.isoformat()
+            if not slots.get("location"):
+                l = _extract_location(user_text)
+                if l:
+                    slots["location"] = l
+            if not slots.get("attendees"):
+                a = _extract_attendees(user_text)
+                if a:
+                    slots["attendees"] = a
+
+            # Ainda faltando algo?
+            if not slots.get("start_iso"):
+                return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "Certo. Para quando é?")
+            if not slots.get("duration"):
+                return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "Qual a duração? 30 minutos, 1 hora…")
+            if not slots.get("title") or slots.get("title") == "Compromisso":
+                return _pending_slots_reply(slots, tz, payload.get("original_text", ""), "E o título do evento?")
+
+            # Tudo pronto → criar
+            start = datetime.fromisoformat(slots["start_iso"]).astimezone(tz)
+            res = create_calendar_event(
+                title=slots["title"],
+                description=f"Criado por voz: “{payload.get('original_text','')} / {user_text}”.",
+                location=slots.get("location"),
+                start=start,
+                end=None,
+                duration_minutes=int(slots.get("duration", 60)),
+                timezone=tz.key,
+                attendees=slots.get("attendees"),
+            )
+            link = res.get("htmlLink")
+            return EventResponse(ok=True, message=f"Pronto! Marquei {slots['title']} para {start.strftime('%d/%m %H:%M')} ({tz.key}).", details={"event": res, "link": link})
+
+        # fallback
+        return EventResponse(ok=False, message="Não consegui processar essa confirmação agora.")
     except Exception as e:
         logger.exception("voice.confirm token decode/create failed")
         raise HTTPException(status_code=400, detail=f"Token inválido ou expirado: {e}")

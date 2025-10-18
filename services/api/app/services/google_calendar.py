@@ -109,7 +109,7 @@ def _ensure_timezone(dt: datetime, tz_name: Optional[str]) -> Tuple[datetime, st
 
     Returns the timezone-aware datetime and the resolved timezone string.
     """
-    resolved_tz = tz_name or settings.calendar_default_timezone
+    resolved_tz = tz_name or getattr(settings, "calendar_default_timezone", None) or "America/New_York"
     try:
         zone = ZoneInfo(resolved_tz)
     except Exception as exc:  # pragma: no cover - zoneinfo raises generic Exception subclasses
@@ -161,11 +161,9 @@ def create_calendar_event(
         "summary": title,
         "start": {
             "dateTime": start_dt.isoformat(),
-            "timeZone": tz,
         },
         "end": {
             "dateTime": end_dt.isoformat(),
-            "timeZone": tz,
         },
     }
 
