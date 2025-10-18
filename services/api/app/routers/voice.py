@@ -9,6 +9,7 @@ import re
 import base64
 
 import dateparser
+from dateparser.search import search_dates
 
 from app.services.google_calendar import create_calendar_event  # você já tem
 from app.services.google_calendar import GoogleCalendarError
@@ -61,16 +62,65 @@ def _tz(tz: Optional[str]) -> ZoneInfo:
         return ZoneInfo(DEFAULT_TZ)
 
 def _parse_when(text: str, tz: ZoneInfo) -> Optional[datetime]:
-    """Entende 'amanhã 9h', 'dia 20 às 15:30', 'daqui 1 mês', etc."""
-    return dateparser.parse(
+    """Entende 'amanhã 9h', 'dia 20 às 15:30', 'daqui 1 mês', etc.
+    Usa dateparser + search_dates e alguns fallbacks em PT-BR.
+    """
+    now = datetime.now(tz)
+    # 1) Tenta parse direto
+    dt = dateparser.parse(
         text,
         languages=["pt"],
         settings={
             "TIMEZONE": tz.key,
             "RETURN_AS_TIMEZONE_AWARE": True,
             "PREFER_DATES_FROM": "future",
+            "RELATIVE_BASE": now,
         },
     )
+    if dt:
+        return dt
+
+    # 2) Busca a primeira data reconhecida na frase
+    try:
+        found = search_dates(
+            text,
+            languages=["pt"],
+            settings={
+                "TIMEZONE": tz.key,
+                "RETURN_AS_TIMEZONE_AWARE": True,
+                "RELATIVE_BASE": now,
+            },
+        )
+        if found:
+            # found é uma lista de tuplas (trecho, datetime)
+            return found[0][1]
+    except Exception:
+        pass
+
+    # 3) Fallback rápido para 'amanhã' com hora opcional
+    m = re.search(r"\bamanh[ãa]\b(?:.*?\bàs?\s*(\d{1,2})(?::(\d{2}))?)?", text, re.I)
+    if m:
+        hour = int(m.group(1) or 9)
+        minute = int(m.group(2) or 0)
+        return (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    # 4) Fallback para 'dia 20 [/[mês][/ano]] às HH[:MM]'
+    m = re.search(r"\bdia\s+(\d{1,2})(?:/(\d{1,2})(?:/(\d{2,4}))?)?(?:.*?\bàs?\s*(\d{1,2})(?::(\d{2}))?)?", text, re.I)
+    if m:
+        d = int(m.group(1))
+        mon = int(m.group(2) or now.month)
+        yr = int(m.group(3) or now.year)
+        # normaliza ano 2 dígitos
+        if yr < 100:
+            yr += 2000
+        hr = int(m.group(4) or 9)
+        mi = int(m.group(5) or 0)
+        try:
+            return datetime(yr, mon, d, hr, mi, tzinfo=tz)
+        except ValueError:
+            return None
+
+    return None
 
 def _parse_duration_minutes(text: str) -> Optional[int]:
     # 'por 2 horas', 'duração 90 min', '1h e 30', etc. (MVP bem prático)
