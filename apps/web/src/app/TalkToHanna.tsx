@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const tz =
   (typeof window !== "undefined" &&
@@ -17,6 +17,34 @@ type SpeechRecognitionResult = any;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SpeechGrammarList = any;
 
+type LogLevel = "info" | "warn" | "error";
+
+type LogEntry = {
+  id: number;
+  level: LogLevel;
+  message: string;
+  timestamp: Date;
+  meta?: unknown;
+};
+
+const LOG_COLORS: Record<LogLevel, string> = {
+  info: "#38bdf8",
+  warn: "#facc15",
+  error: "#f87171",
+};
+
+function formatLogTime(date: Date): string {
+  try {
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return date.toISOString().split("T")[1]?.slice(0, 8) ?? "";
+  }
+}
+
 /**
  * WebRTC client for Hanna (OpenAI Realtime) com hotword e push‑to‑talk.
  * - Gating de microfone: só envia áudio após detectar "Hanna" (ou PTT).
@@ -31,6 +59,54 @@ export default function TalkToHanna() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+
+  // Debug log state
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logsVisible, setLogsVisible] = useState(true);
+  const logIdRef = useRef(0);
+  const logsEndRef = useRef<HTMLDivElement | null>(null);
+
+  const pushLog = useCallback(
+    (message: string, level: LogLevel = "info", meta?: unknown) => {
+      logIdRef.current += 1;
+      const entry: LogEntry = {
+        id: logIdRef.current,
+        level,
+        message,
+        timestamp: new Date(),
+        meta,
+      };
+      setLogs((prev) => {
+        const maxSize = 200;
+        if (prev.length >= maxSize) {
+          return [...prev.slice(prev.length - (maxSize - 1)), entry];
+        }
+        return [...prev, entry];
+      });
+      console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](
+        "[HannaLog]",
+        message,
+        meta ?? ""
+      );
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!logsVisible) return;
+    const anchor = logsEndRef.current;
+    if (anchor) {
+      anchor.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, logsVisible]);
+
+  const setStatusWithLog = useCallback(
+    (text: string, level: LogLevel = "info") => {
+      setStatus(text);
+      pushLog(text, level);
+    },
+    [pushLog]
+  );
 
   // Hotword (Web Speech API)
   const SpeechRecognitionRef = useRef<(new () => SpeechRecognition) | null>(
@@ -67,6 +143,7 @@ export default function TalkToHanna() {
     `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
 
   async function handleAgendaText(text: string) {
+    pushLog(`Reconhecido: "${text}"`);
     try {
       const res = await fetch(`${API_BASE}/voice/handle`, {
         method: "POST",
@@ -74,13 +151,16 @@ export default function TalkToHanna() {
         body: JSON.stringify({ text, timezone: tz }),
       });
       const data = await res.json();
+      pushLog(`/voice/handle → ${res.status}`, "info", data);
       await processServerReply(data);
     } catch (e) {
       console.warn("agenda handle error", e);
+      pushLog("Erro no /voice/handle", "error", e);
     }
   }
 
   async function processServerReply(data: any) {
+    pushLog("Resposta recebida do backend", "info", data);
     // Se o backend sinaliza para não interferir (chit-chat), apenas ignore
     if (data?.details?.noop) return;
 
@@ -95,11 +175,13 @@ export default function TalkToHanna() {
       // mantenha o mic aberto visualmente durante a coleta
       setMicGate(true);
       awaitingAgendaRef.current = true;
-      // Modo de confirmação contínuo: mantém o mic aberto até silêncio (3.5s)
+      pushLog("Backend solicitou confirmação/complemento", "warn");
+      // Modo de confirmação contínuo: mantém o mic aberto até silêncio (~4s)
       captureWindow(
-        3500,
+        4000,
         async (ans) => {
           try {
+            pushLog(`Enviando confirmação: "${ans}"`);
             const resp = await fetch(`${API_BASE}/voice/confirm`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -108,11 +190,13 @@ export default function TalkToHanna() {
                 text: ans,
               }),
             });
+            pushLog(`/voice/confirm → ${resp.status}`);
             const follow = await resp.json();
             // Recursivo: se ainda faltar algo, ele volta com expecting_input true
             await processServerReply(follow);
           } catch (err) {
             console.warn("confirm error", err);
+            pushLog("Erro no /voice/confirm", "error", err);
           } finally {
             pendingConfirmRef.current = null;
           }
@@ -121,11 +205,11 @@ export default function TalkToHanna() {
           // silêncio detectado → fecha o gate de mic
           awaitingAgendaRef.current = false;
           setMicGate(false);
+          pushLog("Janela de confirmação encerrada por silêncio");
         }
       );
       return;
     }
-    awaitingAgendaRef.current = false;
   }
 
   function captureOnce(onText: (t: string) => void) {
@@ -161,6 +245,7 @@ export default function TalkToHanna() {
     rec.interimResults = true;
     rec.maxAlternatives = 1;
     rec.continuous = true;
+    pushLog(`Captura contínua iniciada (${silenceMs}ms ou silêncio)`);
 
     let silenceTimer: number | null = null;
     const armSilence = () => {
@@ -180,10 +265,12 @@ export default function TalkToHanna() {
       if (res.isFinal) {
         const t = (res[0]?.transcript || "").trim();
         if (t) onFinalText(t);
+        if (t) pushLog(`Transcrição finalizada: "${t}"`);
       }
     };
 
     rec.onerror = () => {
+      pushLog("CaptureWindow erro no SpeechRecognition", "warn");
       try {
         rec.stop();
       } catch {}
@@ -192,6 +279,7 @@ export default function TalkToHanna() {
     rec.onend = () => {
       if (silenceTimer) window.clearTimeout(silenceTimer);
       onStop?.();
+      pushLog("CaptureWindow finalizado");
     };
 
     try {
@@ -199,10 +287,6 @@ export default function TalkToHanna() {
       armSilence();
     } catch {}
   }
-  // Palavras-chave para reconhecer intenção de agenda (cliente)
-  const AGENDA_INTENT =
-    /(marc(a|ar)|agend(a|ar)|reuni(ão|ao)|visita|orçamento|orcamento|compromissos?|agenda|calend[aá]rio)/i;
-
   // ---------- Helpers ----------
   function attachRemoteAudio(peer: RTCPeerConnection) {
     // Create (or reuse) audio element for remote stream
@@ -230,12 +314,14 @@ export default function TalkToHanna() {
 
   function setMicGate(on: boolean) {
     setMicActive(on);
+    pushLog(on ? "Mic aberto" : "Mic fechado");
     try {
       localStreamRef.current?.getAudioTracks().forEach((t) => (t.enabled = on));
     } catch {}
   }
 
   function teardown() {
+    pushLog("Encerrando sessão/teardown");
     // Desliga hotword
     try {
       recognizerRef.current?.stop();
@@ -244,7 +330,7 @@ export default function TalkToHanna() {
 
     // Fecha mídia e peer
     setConnected(false);
-    setStatus("Desconectado.");
+    setStatusWithLog("Desconectado.");
     try {
       pc?.getSenders().forEach((s) => s.track?.stop());
       pc?.close();
@@ -297,8 +383,9 @@ export default function TalkToHanna() {
 
     // Sem suporte, apenas informe e não tente rodar
     if (!SR) {
-      setStatus(
-        "Hotword indisponível no navegador; use o botão 'Falar (segure)'."
+      setStatusWithLog(
+        "Hotword indisponível no navegador; use o botão 'Falar (segure)'.",
+        "warn"
       );
       return;
     }
@@ -343,6 +430,7 @@ export default function TalkToHanna() {
     const restart = (why: string) => {
       if (!connected || restarting) return;
       restarting = true;
+      pushLog(`Hotword recognition reiniciando (${why})`, "warn");
       // pequeno backoff para não entrar em loop em erros como 'no-speech'
       setTimeout(() => {
         restarting = false;
@@ -365,16 +453,17 @@ export default function TalkToHanna() {
         .join(" ")
         .trim()
         .toLowerCase();
+      if (text) pushLog(`Hotword reconhecimento parcial: "${text}"`);
 
       // Palavra exata apenas: 'hanna'
       if (/\bhanna\b/.test(text)) {
-        setStatus("Hotword detectada: microfone liberado");
+        setStatusWithLog("Hotword detectada: microfone liberado");
         setMicGate(true);
         awaitingAgendaRef.current = true;
         if (wakeTimerRef.current) window.clearTimeout(wakeTimerRef.current);
         // Janela natural baseada em silêncio: mantém aberto enquanto houver fala
         captureWindow(
-          3500,
+          4000,
           async (cmd) => {
             if (!awaitingAgendaRef.current) return;
             if (pendingConfirmRef.current) return; // aguardando follow‑up
@@ -386,7 +475,7 @@ export default function TalkToHanna() {
             // encerrado por silêncio
             setMicGate(false);
             awaitingAgendaRef.current = false;
-            setStatus("Aguardando chamar 'Hanna'…");
+            setStatusWithLog("Aguardando chamar 'Hanna'…");
           }
         );
       }
@@ -415,16 +504,20 @@ export default function TalkToHanna() {
       } else if (et === "audio-capture") {
         // geralmente permissão ou conflito; apenas informe
         console.warn("SpeechRecognition sem acesso ao microfone.");
+        pushLog("SpeechRecognition sem acesso ao microfone", "warn");
       } else {
         console.warn("SpeechRecognition error:", e);
+        pushLog("SpeechRecognition erro inesperado", "error", e);
       }
     };
 
     try {
       // Inicia após o gesto do usuário (já ocorreu ao conectar)
       rec.start();
+      pushLog("Hotword recognition iniciado");
     } catch (err) {
       console.warn("SpeechRecognition start error:", err);
+      pushLog("Falha ao iniciar SpeechRecognition", "error", err);
     }
 
     return () => {
@@ -438,8 +531,9 @@ export default function TalkToHanna() {
 
   async function startSession() {
     if (negotiating || connected) return;
+    pushLog("Iniciando sessão WebRTC");
     setNegotiating(true);
-    setStatus("Solicitando microfone…");
+    setStatusWithLog("Solicitando microfone…");
 
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), 25_000); // 25s safety timeout
@@ -449,8 +543,9 @@ export default function TalkToHanna() {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const mics = devices.filter((d) => d.kind === "audioinput");
       if (!mics.length) {
-        setStatus(
-          "Nenhum microfone foi encontrado. Conecte um microfone e recarregue a página."
+        setStatusWithLog(
+          "Nenhum microfone foi encontrado. Conecte um microfone e recarregue a página.",
+          "warn"
         );
         alert(
           "Nenhum microfone disponível. Conecte/ative um microfone e confira as permissões do navegador."
@@ -500,7 +595,7 @@ export default function TalkToHanna() {
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
       });
       setPc(peer);
-      setStatus("Criando conexão WebRTC…");
+      setStatusWithLog("Criando conexão WebRTC…");
 
       // 3) Remote audio
       attachRemoteAudio(peer);
@@ -516,7 +611,7 @@ export default function TalkToHanna() {
       await peer.setLocalDescription(offer);
 
       // 6) Fetch ephemeral token from backend
-      setStatus("Criando sessão Realtime…");
+      setStatusWithLog("Criando sessão Realtime…");
       const res = await fetch(api("/session"), {
         method: "POST",
         cache: "no-store",
@@ -541,7 +636,7 @@ export default function TalkToHanna() {
       }
 
       // 7) Exchange SDP with OpenAI Realtime (voice in query)
-      setStatus("Negociando SDP com Realtime…");
+      setStatusWithLog("Negociando SDP com Realtime…");
       const sdpResp = await fetch(
         `https://api.openai.com/v1/realtime?model=${encodeURIComponent(
           MODEL
@@ -572,13 +667,13 @@ export default function TalkToHanna() {
 
       // 8) Connection state feedback
       peer.oniceconnectionstatechange = () => {
-        setStatus(`ICE: ${peer.iceConnectionState}`);
+        setStatusWithLog(`ICE: ${peer.iceConnectionState}`);
         if (
           peer.iceConnectionState === "connected" ||
           peer.iceConnectionState === "completed"
         ) {
           setConnected(true);
-          setStatus(
+          setStatusWithLog(
             `Conectado. Diga: “Hanna, …” e fale naturalmente (agenda inclusa).`
           );
         }
@@ -593,12 +688,13 @@ export default function TalkToHanna() {
 
       peer.onconnectionstatechange = () => {
         if (peer.connectionState === "failed") {
-          setStatus("Falha na conexão. Encerrando…");
+          setStatusWithLog("Falha na conexão. Encerrando…", "warn");
           teardown();
         }
       };
     } catch (err: any) {
       console.error("startSession erro:", err);
+      pushLog("startSession erro", "error", err);
       if (err?.name === "NotAllowedError") {
         alert("Permissão de microfone negada. Habilite para continuar.");
       } else if (
@@ -621,78 +717,207 @@ export default function TalkToHanna() {
   }
 
   return (
-    <main
-      style={{
-        backgroundColor: "#0d0d0d",
-        color: "#fff",
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        justifyContent: "center",
-        alignItems: "center",
-        gap: 16,
-        padding: 24,
-      }}
-    >
-      <h1 style={{ fontSize: "2rem" }}>
-        {connected ? "🎙️ Hanna está te ouvindo..." : "Falar com a Hanna"}
-      </h1>
-      <div style={{ opacity: 0.7, fontSize: 14 }}>{status}</div>
+    <>
+      <main
+        style={{
+          backgroundColor: "#0d0d0d",
+          color: "#fff",
+          minHeight: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: 16,
+          padding: 24,
+        }}
+      >
+        <h1 style={{ fontSize: "2rem" }}>
+          {connected ? "🎙️ Hanna está te ouvindo..." : "Falar com a Hanna"}
+        </h1>
+        <div style={{ opacity: 0.7, fontSize: 14 }}>{status}</div>
 
-      {!connected ? (
-        <button
-          onClick={startSession}
-          disabled={negotiating}
+        {!connected ? (
+          <button
+            onClick={startSession}
+            disabled={negotiating}
+            style={{
+              backgroundColor: "#6366f1",
+              border: "none",
+              padding: "1rem 2rem",
+              borderRadius: 12,
+              fontSize: "1.2rem",
+              color: "#fff",
+              cursor: negotiating ? "not-allowed" : "pointer",
+            }}
+          >
+            {negotiating ? "Conectando..." : "Iniciar conversa"}
+          </button>
+        ) : (
+          <div style={{ display: "flex", gap: 12 }}>
+            <button
+              onMouseDown={() => setMicGate(true)}
+              onMouseUp={() => setMicGate(false)}
+              onTouchStart={() => setMicGate(true)}
+              onTouchEnd={() => setMicGate(false)}
+              style={{
+                backgroundColor: micActive ? "#22c55e" : "#0ea5e9",
+                border: "none",
+                padding: "1rem 2rem",
+                borderRadius: 12,
+                fontSize: "1.2rem",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+              title="Segure para falar"
+            >
+              {micActive ? "🎙️ Falando…" : "Falar (segure)"}
+            </button>
+
+            <button
+              onClick={teardown}
+              style={{
+                backgroundColor: "#ef4444",
+                border: "none",
+                padding: "1rem 2rem",
+                borderRadius: 12,
+                fontSize: "1.2rem",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+              title="Encerrar (Esc)"
+            >
+              Desconectar
+            </button>
+          </div>
+        )}
+      </main>
+
+      <div
+        style={{
+          position: "fixed",
+          bottom: 16,
+          right: 16,
+          width: logsVisible ? 360 : 200,
+          backgroundColor: "rgba(12, 12, 12, 0.92)",
+          color: "#e2e8f0",
+          borderRadius: 12,
+          border: "1px solid rgba(148, 163, 184, 0.2)",
+          boxShadow: "0 12px 24px rgba(0,0,0,0.35)",
+          fontFamily: "monospace",
+          fontSize: 12,
+          backdropFilter: "blur(6px)",
+          zIndex: 50,
+        }}
+      >
+        <div
           style={{
-            backgroundColor: "#6366f1",
-            border: "none",
-            padding: "1rem 2rem",
-            borderRadius: 12,
-            fontSize: "1.2rem",
-            color: "#fff",
-            cursor: negotiating ? "not-allowed" : "pointer",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 12px",
+            borderBottom: logsVisible
+              ? "1px solid rgba(148, 163, 184, 0.2)"
+              : "none",
+            gap: 12,
           }}
         >
-          {negotiating ? "Conectando..." : "Iniciar conversa"}
-        </button>
-      ) : (
-        <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ fontWeight: 600 }}>
+            Logs ({logs.length.toString().padStart(2, "0")})
+          </div>
           <button
-            onMouseDown={() => setMicGate(true)}
-            onMouseUp={() => setMicGate(false)}
-            onTouchStart={() => setMicGate(true)}
-            onTouchEnd={() => setMicGate(false)}
+            onClick={() => setLogsVisible((prev) => !prev)}
             style={{
-              backgroundColor: micActive ? "#22c55e" : "#0ea5e9",
-              border: "none",
-              padding: "1rem 2rem",
-              borderRadius: 12,
-              fontSize: "1.2rem",
-              color: "#fff",
+              backgroundColor: "transparent",
+              border: "1px solid rgba(148, 163, 184, 0.4)",
+              color: "#e2e8f0",
+              padding: "4px 8px",
+              borderRadius: 6,
               cursor: "pointer",
+              fontSize: 11,
             }}
-            title="Segure para falar"
           >
-            {micActive ? "🎙️ Falando…" : "Falar (segure)"}
-          </button>
-
-          <button
-            onClick={teardown}
-            style={{
-              backgroundColor: "#ef4444",
-              border: "none",
-              padding: "1rem 2rem",
-              borderRadius: 12,
-              fontSize: "1.2rem",
-              color: "#fff",
-              cursor: "pointer",
-            }}
-            title="Encerrar (Esc)"
-          >
-            Desconectar
+            {logsVisible ? "Ocultar" : "Mostrar"}
           </button>
         </div>
-      )}
-    </main>
+
+        {logsVisible && (
+          <div
+            style={{
+              maxHeight: "45vh",
+              overflowY: "auto",
+              padding: "8px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            {logs.length === 0 ? (
+              <div style={{ opacity: 0.6 }}>
+                Nenhum evento registrado ainda.
+              </div>
+            ) : (
+              logs.map((entry) => {
+                const meta =
+                  entry.meta === undefined || entry.meta === null
+                    ? null
+                    : typeof entry.meta === "string"
+                    ? entry.meta
+                    : JSON.stringify(entry.meta, null, 2);
+                return (
+                  <div
+                    key={entry.id}
+                    style={{
+                      borderLeft: `3px solid ${LOG_COLORS[entry.level]}`,
+                      paddingLeft: 8,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        alignItems: "baseline",
+                      }}
+                    >
+                      <span style={{ opacity: 0.6 }}>
+                        {formatLogTime(entry.timestamp)}
+                      </span>
+                      <span
+                        style={{
+                          color: LOG_COLORS[entry.level],
+                          fontWeight: 600,
+                        }}
+                      >
+                        {entry.level.toUpperCase()}
+                      </span>
+                    </div>
+                    <div>{entry.message}</div>
+                    {meta && (
+                      <pre
+                        style={{
+                          margin: 0,
+                          backgroundColor: "rgba(15, 23, 42, 0.6)",
+                          padding: "6px 8px",
+                          borderRadius: 6,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          maxHeight: 160,
+                          overflow: "auto",
+                        }}
+                      >
+                        {meta}
+                      </pre>
+                    )}
+                  </div>
+                );
+              })
+            )}
+            <div ref={logsEndRef} />
+          </div>
+        )}
+      </div>
+    </>
   );
 }

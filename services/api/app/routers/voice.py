@@ -76,7 +76,7 @@ def _parse_when(text: str, tz: ZoneInfo) -> Optional[datetime]:
     # 1) Tenta parse direto
     dt = dateparser.parse(
         text,
-        languages=["pt"],
+        languages=["pt", "en"],
         settings={
             "TIMEZONE": tz.key,
             "RETURN_AS_TIMEZONE_AWARE": True,
@@ -91,7 +91,7 @@ def _parse_when(text: str, tz: ZoneInfo) -> Optional[datetime]:
     try:
         found = search_dates(
             text,
-            languages=["pt"],
+            languages=["pt", "en"],
             settings={
                 "TIMEZONE": tz.key,
                 "RETURN_AS_TIMEZONE_AWARE": True,
@@ -271,6 +271,7 @@ def handle_voice(cmd: VoiceCommand):
     text = cmd.text.strip()
     intent = _intent(text)
     tz = _tz(cmd.timezone)
+    logger.info("voice.handle intent=%s tz=%s text=%s", intent, tz.key, text)
 
     if intent == "chat":
         # Não interferimos: deixa o cliente Realtime responder normalmente
@@ -314,6 +315,7 @@ def handle_voice(cmd: VoiceCommand):
 
     # coleta progressiva
     if not when:
+        logger.info("voice.handle missing datetime for text=%s", text)
         return _pending_slots_reply(
             slots,
             tz,
@@ -356,6 +358,13 @@ def handle_voice(cmd: VoiceCommand):
         )
 
     try:
+        logger.info(
+            "voice.handle creating event title=%s start=%s duration=%s tz=%s",
+            title,
+            start.isoformat(),
+            duration,
+            tz.key,
+        )
         res = create_calendar_event(
             title=title,
             description=f"Criado por voz: “{text}”.",
@@ -369,6 +378,7 @@ def handle_voice(cmd: VoiceCommand):
         link = res.get("htmlLink")
         local_start = start.astimezone(tz)
         when_pt = local_start.strftime("%d/%m %H:%M")
+        logger.info("voice.handle created event id=%s link=%s", res.get("id"), link)
         return EventResponse(
             ok=True,
             message=f"Pronto! Marquei {title} para {when_pt} ({tz.key}).",
@@ -408,6 +418,7 @@ def _list_events_day(day: date, tz: ZoneInfo):
 @router.post("/confirm", response_model=EventResponse)
 def confirm_voice(body: ConfirmBody):
     try:
+        logger.info("voice.confirm received confirm=%s text=%s", body.confirm, body.text)
         data = _decode_token(body.confirmation_token)
         tz = _tz(data.get("tz"))
         payload = data if isinstance(data, dict) else {}
@@ -420,6 +431,12 @@ def confirm_voice(body: ConfirmBody):
             if not confirmed:
                 return EventResponse(ok=True, message="Ok, não vou criar esse evento agora.")
             start = datetime.fromisoformat(payload["start_iso"]).astimezone(tz)
+            logger.info(
+                "voice.confirm creating post-conflict event title=%s start=%s tz=%s",
+                payload.get("title", "Compromisso"),
+                start.isoformat(),
+                tz.key,
+            )
             res = create_calendar_event(
                 title=payload.get("title", "Compromisso"),
                 description=f"Criado por voz (confirmado): “{payload.get('original_text','')}”.",
@@ -487,6 +504,12 @@ def confirm_voice(body: ConfirmBody):
             )
             link = res.get("htmlLink")
             when_label = start.strftime('%d/%m %H:%M')
+            logger.info(
+                "voice.confirm finalizando criação title=%s start=%s tz=%s",
+                slots["title"],
+                start.isoformat(),
+                tz.key,
+            )
             return EventResponse(
                 ok=True,
                 message=f"Pronto! Marquei {slots['title']} para {when_label} ({tz.key}).",
